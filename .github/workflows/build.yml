@@ -1,0 +1,27 @@
+name: Build Amari Keys
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -B build -G "Visual Studio 17 2022" -A x64
+      - name: Build
+        run: cmake --build build --config Release --target AmariKeys_VST3 AmariKeys_Standalone --parallel
+      - name: Upload VST3
+        uses: actions/upload-artifact@v4
+        with:
+          name: AmariKeys-Windows-VST3
+          path: build/AmariKeys_artefacts/Release/VST3/
+          retention-days: 7
+      - name: Upload Standalone
+        uses: actions/upload-artifact@v4
+        with:
+          name: AmariKeys-Windows-Standalone
+          path: build/AmariKeys_artefacts/Release/Standalone/
+          retention-days: 7

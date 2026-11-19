@@ -1,6 +1,7 @@
 #include "../Source/PluginProcessor.h"
 #include "../Source/PluginEditor.h"
 #include <juce_audio_formats/juce_audio_formats.h>
+#include "../Source/Sampler.h"
 
 using namespace juce;
 
@@ -117,6 +118,56 @@ int main (int argc, char** argv)
         chord (e, 0.1, 3.8, { 36, 43, 46 }, 0.8f); chord (e, 0.1, 1.8, { 60, 64, 67, 70 }, 0.8f); chord (e, 2.0, 1.9, { 62, 65, 69, 72 }, 0.7f);
         chord (e, 4.0, 3.8, { 41, 45, 48 - 1 }, 0.8f); chord (e, 4.0, 3.8, { 60, 65, 69, 72 }, 0.85f);
         render (*p, e, 10.0, outDir.getChildFile ("08_split_organ_plus_keys_synth.wav"));
+    }
+
+    // ---- sampler: name parsing
+    {
+        const char* names[] = { "Piano_C4_v2", "A0v1", "C#4v16", "Db3_mf", "060", "Grand-F#2-ff", "Rhodes C3", "release_C4", "noise" };
+        for (auto* nm : names)
+        {
+            int note, layer; const bool ok = SampleLoader::parseFileName (nm, note, layer);
+            std::cout << "parse " << nm << " -> " << (ok ? MidiMessage::getMidiNoteName (note, true, true, 4) : String ("none")) << " layer " << layer << std::endl;
+        }
+    }
+    // ---- sampler: synthetic folder (every 3 semitones, 2 layers) + sfz
+    {
+        File dir = outDir.getChildFile ("testsamples"); dir.deleteRecursively(); dir.createDirectory();
+        WavAudioFormat wav;
+        String sfz = "<control> default_path=./\n";
+        for (int note = 21; note <= 108; note += 3)
+            for (int layer = 1; layer <= 2; ++layer)
+            {
+                const double sr = 44100.0; const int len = (int) (sr * 2.0);
+                AudioBuffer<float> b (2, len);
+                const double f = 440.0 * std::pow (2.0, (note - 69) / 12.0);
+                for (int i = 0; i < len; ++i)
+                {
+                    const double t = i / sr; const float env = (float) std::exp (-t / 0.8);
+                    const float v = (float) (std::sin (2 * MathConstants<double>::pi * f * t) + (layer == 2 ? 0.4 * std::sin (6 * MathConstants<double>::pi * f * t) : 0.0)) * env * (layer == 2 ? 0.7f : 0.35f);
+                    b.setSample (0, i, v); b.setSample (1, i, v);
+                }
+                auto name = "TestPiano_" + MidiMessage::getMidiNoteName (note, true, true, 4) + "_v" + String (layer) + ".wav";
+                File wf = dir.getChildFile (name);
+                std::unique_ptr<OutputStream> os (wf.createOutputStream());
+                auto w = wav.createWriterFor (os, AudioFormatWriterOptions().withSampleRate (sr).withNumChannels (2).withBitsPerSample (16));
+                w->writeFromAudioSampleBuffer (b, 0, len);
+                sfz << "<region> sample=" << name << " lokey=" << note - 1 << " hikey=" << note + 1 << " pitch_keycenter=" << note
+                    << " lovel=" << (layer == 1 ? 1 : 65) << " hivel=" << (layer == 1 ? 64 : 127) << "\n";
+            }
+        dir.getChildFile ("test.sfz").replaceWithText (sfz);
+
+        for (int mode = 0; mode < 2; ++mode)
+        {
+            auto p = fresh(); setP (*p, "split_on", 0); setP (*p, "org_on", 0); setP (*p, "syn_on", 0);
+            p->setPlayConfigDetails (0, 2, 48000.0, 256); p->prepareToPlay (48000.0, 256);
+            p->loadSamples (mode == 0 ? dir : dir.getChildFile ("test.sfz"));
+            while (p->isLoadingSamples()) Thread::sleep (20);
+            std::cout << (mode == 0 ? "folder: " : "sfz: ") << p->getSampleName() << " | " << p->getSampleStatus() << std::endl;
+            setP (*p, "keys_model", 4.0f);
+            std::vector<Ev> e;
+            chord (e, 0.1, 1.5, { 48, 55, 60, 64 }, 0.4f); chord (e, 1.8, 1.5, { 50, 57, 62, 65 }, 0.95f);
+            render (*p, e, 4.0, outDir.getChildFile (mode == 0 ? "09_sampler_folder.wav" : "10_sampler_sfz.wav"));
+        }
     }
 
     // UI snapshot

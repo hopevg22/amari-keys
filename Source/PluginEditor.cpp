@@ -324,8 +324,8 @@ AmariKeysEditor::AmariKeysEditor (AmariKeysProcessor& p)
     {
         const int x = 596, w = 260; sec (x, top, w, H, "KEYS", col::keys);
         place (make<Toggle> (s, "keys_on", "ON", col::keys), x + w - 54, top + 8, 44, 22);
-        cap (x + 12, top + 42, w - 24, "MODEL  ·  SAMPLE-FREE (SAMPLED PIANO COMES NEXT)");
-        place (make<Segmented> (s, "keys_model", Params::keysModels(), col::keys, 2), x + 12, top + 58, w - 24, 50);
+        cap (x + 12, top + 42, w - 24, "MODEL");
+        place (make<Segmented> (s, "keys_model", Params::keysModels(), col::keys, 3), x + 12, top + 58, w - 24, 50);
         cap (x + 12, top + 124, 60, "TIMBRE");
         place (make<Segmented> (s, "keys_timbre", Params::timbres(), col::keys), x + 70, top + 119, w - 82, 22);
         place (make<Knob> (s, "keys_dyn", "DYNAMICS", col::keys, 34), x + 8, top + 158, 58, 52);
@@ -334,7 +334,33 @@ AmariKeysEditor::AmariKeysEditor (AmariKeysProcessor& p)
         place (make<Knob> (s, "keys_vol", "VOL", col::keys, 34), x + 188, top + 158, 58, 52);
         cap (x + 12, top + 296, 50, "OCTAVE");
         place (make<Segmented> (s, "keys_oct", StringArray { "-2", "-1", "0", "+1", "+2" }, col::keys, 0, -2), x + 70, top + 291, 150, 22);
-        cap (x + 12, top + 232, w - 24, "SUSTAIN PEDAL (CC64) HOLDS KEYS + SYNTH");
+        cap (x + 12, top + 222, 90, "MY SAMPLES");
+        for (auto* b : { &loadFolderButton, &loadSfzButton })
+        {
+            b->setColour (TextButton::textColourOffId, col::keys);
+            content.addAndMakeVisible (*b);
+        }
+        loadFolderButton.setBounds (x + 92, top + 217, 82, 22);
+        loadSfzButton.setBounds (x + 178, top + 217, 70, 22);
+        sampleStatusArea = { x + 12, top + 244, w - 24, 36 };
+        loadFolderButton.onClick = [this]
+        {
+            chooser = std::make_unique<FileChooser> ("Choose a folder of samples (WAV / AIFF / FLAC named by note)", File(), "*");
+            chooser->launchAsync (FileBrowserComponent::openMode | FileBrowserComponent::canSelectDirectories, [this] (const FileChooser& fc)
+            {
+                auto f = fc.getResult();
+                if (f.isDirectory()) proc.loadSamples (f);
+            });
+        };
+        loadSfzButton.onClick = [this]
+        {
+            chooser = std::make_unique<FileChooser> ("Choose an .sfz instrument", File(), "*.sfz");
+            chooser->launchAsync (FileBrowserComponent::openMode | FileBrowserComponent::canSelectFiles, [this] (const FileChooser& fc)
+            {
+                auto f = fc.getResult();
+                if (f.existsAsFile()) proc.loadSamples (f);
+            });
+        };
     }
     // ---------------- SYNTH ----------------
     {
@@ -442,6 +468,7 @@ AmariKeysEditor::AmariKeysEditor (AmariKeysProcessor& p)
 AmariKeysEditor::~AmariKeysEditor()
 {
     stopTimer();
+    chooser.reset();
     splitAtt.reset(); transAtt.reset(); blendAtt.reset();
     owned.clear();
     content.setLookAndFeel (nullptr);
@@ -466,8 +493,8 @@ void AmariKeysEditor::paintContent (Graphics& g)
     g.setColour (col::text); g.setFont (FontOptions (19.0f, Font::bold));
     g.drawText ("A M A R I   K E Y S", 18, 0, 230, 44, Justification::centredLeft, false);
     g.setColour (col::dim); g.setFont (FontOptions (9.5f, Font::bold));
-    g.drawText (String::fromUTF8 ("AMARI LABS  ·  TEST BUILD 0.1"), 232, 0, 180, 44, Justification::centredLeft, false);
-    g.drawText (String::fromUTF8 ("ORGAN · ELECTRIC KEYS · SYNTH · DRUM PADS  —  ALL SAMPLE-FREE"), 1120, 0, 470, 44, Justification::centredRight, false);
+    g.drawText (String::fromUTF8 ("AMARI LABS  ·  TEST BUILD 0.2"), 232, 0, 180, 44, Justification::centredLeft, false);
+    g.drawText (String::fromUTF8 ("ORGAN · ELECTRIC KEYS · MY SAMPLES · SYNTH · DRUM PADS"), 1120, 0, 470, 44, Justification::centredRight, false);
 
     for (auto& s : sections)
     {
@@ -489,6 +516,17 @@ void AmariKeysEditor::paintContent (Graphics& g)
     g.setColour (col::dim);
     for (auto& c : captions) g.drawText (c.second, c.first, Justification::centredLeft, false);
 
+    // sample status in the KEYS section
+    {
+        auto st = sampleStatusArea.toFloat();
+        g.setColour (col::well); g.fillRoundedRectangle (st, 4.0f);
+        g.setColour (Colour (0xff2e323c)); g.drawRoundedRectangle (st.reduced (0.5f), 4.0f, 1.0f);
+        const auto name = proc.getSampleName();
+        g.setColour (col::keys); g.setFont (FontOptions (11.0f, Font::bold));
+        g.drawText (name.isEmpty() ? String ("No sample set loaded") : name, st.reduced (8.0f, 3.0f).removeFromTop (15.0f), Justification::centredLeft, true);
+        g.setColour (col::dim); g.setFont (FontOptions (9.0f, Font::bold));
+        g.drawText (proc.getSampleStatus(), st.reduced (8.0f, 3.0f).removeFromBottom (14.0f), Justification::centredLeft, true);
+    }
     // zone bar from split point
     const bool split = proc.apvts.getRawParameterValue ("split_on")->load() > 0.5f;
     const int splitN = (int) proc.apvts.getRawParameterValue ("split_note")->load();
@@ -526,6 +564,8 @@ void AmariKeysEditor::timerCallback()
         if (h != lastPadHits[i]) { lastPadHits[i] = h; pads[i]->flash = 1.0f; pads[i]->repaint(); }
         else if (pads[i]->flash > 0.0f) { pads[i]->flash = jmax (0.0f, pads[i]->flash - 0.12f); pads[i]->repaint(); }
     }
+    const auto status = proc.getSampleStatus() + proc.getSampleName();
+    if (status != lastStatus) { lastStatus = status; content.repaint (sampleStatusArea); }
     const bool splitOn = proc.apvts.getRawParameterValue ("split_on")->load() > 0.5f;
     const int split = (int) proc.apvts.getRawParameterValue ("split_note")->load();
     if (split != lastSplit || splitOn != lastSplitOn)

@@ -135,7 +135,10 @@ private:
     juce::MidiKeyboardComponent keyboard;
     ak::PadButton* pads[DrumEngine::numPads] {};
     int lastPadHits[DrumEngine::numPads] {};
-    juce::TextButton panicButton { "PANIC" };
+    juce::TextButton panicButton { "PANIC" }, loadFolderButton { "LOAD FOLDER" }, loadSfzButton { "LOAD SFZ" };
+    std::unique_ptr<juce::FileChooser> chooser;
+    juce::Rectangle<int> sampleStatusArea;
+    juce::String lastStatus;
     juce::Slider splitNote, transpose;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> splitAtt, transAtt, blendAtt;
 

@@ -15,3 +15,10 @@ Locally: `cmake -B build && cmake --build build --config Release --target AmariK
 (JUCE 8.0.12 is fetched automatically; pass `-DJUCE_DIR=...` to use a local copy.)
 
 Install: copy `Amari Keys.vst3` to `C:\Program Files\Common Files\VST3\` and rescan in Ableton.
+
+## MY SAMPLES (build 0.2)
+In the KEYS section press **LOAD FOLDER** (a folder of WAV/AIFF/FLAC/OGG files) or **LOAD SFZ**.
+Folder files are mapped by the note in their name: `Piano_C4_v2.wav`, `A0v1.flac`, `C#4.wav`, `Db3_mf.wav`, `060.wav`.
+Velocity layers come from `v1`, `v2`… or `pp/p/mp/mf/f/ff` (soft → loud). Gaps between sampled notes are filled by repitching the nearest sample.
+Files with release / harmonics / pedal / noise in the name are skipped. Samples are held in memory as 16-bit (max 30 s each).
+The loaded path is saved with the session and reloads automatically.

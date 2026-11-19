@@ -5,6 +5,67 @@ AmariKeysProcessor::AmariKeysProcessor()
     : AudioProcessor (BusesProperties().withOutput ("Output", juce::AudioChannelSet::stereo(), true)),
       apvts (*this, nullptr, "AmariKeys", Params::createLayout())
 {
+    startTimerHz (2);
+}
+
+AmariKeysProcessor::~AmariKeysProcessor()
+{
+    alive->store (false);
+    stopTimer();
+    loaderPool.removeAllJobs (true, 30000);
+}
+
+void AmariKeysProcessor::timerCallback()
+{
+    std::unique_ptr<SampleSet> toDelete;
+    {
+        const juce::SpinLock::ScopedLockType l (swapLock);
+        toDelete = std::move (retiredSet);
+    }
+}
+
+void AmariKeysProcessor::loadSamples (const juce::File& source)
+{
+    if (loading.exchange (true)) return;
+    {
+        const juce::ScopedLock l (statusLock);
+        sampleStatus = "Loading " + source.getFileName() + " ...";
+    }
+    loaderPool.addJob ([this, source]
+    {
+        juce::String msg;
+        auto set = SampleLoader::load (source, msg, [this, source] (float p)
+        {
+            const juce::ScopedLock l (statusLock);
+            sampleStatus = "Loading " + source.getFileName() + "  " + juce::String (juce::roundToInt (p * 100.0f)) + "%";
+        });
+        const bool ok = set != nullptr;
+        const juce::String name = ok ? set->name : juce::String();
+        if (ok)
+        {
+            const juce::String mb = juce::String (juce::roundToInt ((double) set->bytes / (1024.0 * 1024.0))) + " MB in memory";
+            msg << "  |  " << juce::MidiMessage::getMidiNoteName (set->lowNote, true, true, 4) << " to "
+                << juce::MidiMessage::getMidiNoteName (set->highNote, true, true, 4) << "  |  " << mb;
+            const juce::SpinLock::ScopedLockType l (swapLock);
+            pendingSet = std::move (set);
+        }
+        {
+            const juce::ScopedLock l (statusLock);
+            sampleStatus = ok ? msg : "Load failed: " + msg;
+            if (ok) sampleName = name;
+        }
+        if (ok)
+        {
+            const auto path = source.getFullPathName();
+            juce::MessageManager::callAsync ([this, path, token = alive]
+            {
+                if (! token->load()) return;
+                apvts.state.setProperty ("samplePath", path, nullptr);
+                if (auto* prm = apvts.getParameter ("keys_model")) prm->setValueNotifyingHost (prm->convertTo0to1 (4.0f));
+            });
+        }
+        loading.store (false);
+    });
 }
 
 bool AmariKeysProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
@@ -17,7 +78,7 @@ void AmariKeysProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
     sr = sampleRate;
     maxBlock = juce::jmax (512, samplesPerBlock);
     organ.prepare (sr); rotary.prepare (sr);
-    keys.prepare (sr); synth.prepare (sr); drums.prepare (sr);
+    keys.prepare (sr); synth.prepare (sr); drums.prepare (sr); sampler.prepare (sr); sampler.setSet (liveSet.get());
 
     for (auto* b : { &orgMono }) b->setSize (1, maxBlock);
     for (auto* b : { &orgSt, &keysBuf, &synBuf, &padBuf, &fxBuf }) b->setSize (2, maxBlock);
@@ -55,6 +116,7 @@ void AmariKeysProcessor::updateSettings()
     const int tb = (int) param ("keys_timbre");
     k.timbre = tb == 0 ? 0.6f : tb == 1 ? 1.0f : 1.55f;
     k.dynamics = param ("keys_dyn"); k.decay = param ("keys_decay"); k.tremolo = param ("keys_trem");
+    sampler.dynamics = k.dynamics; sampler.release = 0.05f + param ("keys_decay") * 1.5f; sampler.timbre = tb;
 
     auto& y = synth.s;
     y.voiceMode = (int) param ("syn_voice");
@@ -98,7 +160,8 @@ void AmariKeysProcessor::handleMidi (const juce::MidiMessage& m)
         if (upper && param ("keys_on") > 0.5f)
         {
             const int kn = juce::jlimit (0, 127, n + 12 * (int) param ("keys_oct"));
-            keys.noteOn (kn, vel); keysDown[kn] = true; heldBySustainKeys[kn] = false; r.keys = (int8_t) kn;
+            if ((int) param ("keys_model") == 4) sampler.noteOn (kn, vel); else keys.noteOn (kn, vel);
+            keysDown[kn] = true; heldBySustainKeys[kn] = false; r.keys = (int8_t) kn;
         }
         if (upper && param ("syn_on") > 0.5f)
         {
@@ -113,7 +176,7 @@ void AmariKeysProcessor::handleMidi (const juce::MidiMessage& m)
         if (ch == 9) return;
         auto& r = routed[ch][note];
         if (r.org >= 0) organ.noteOff (r.org);
-        if (r.keys >= 0) { keysDown[r.keys] = false; if (sustain) heldBySustainKeys[r.keys] = true; else keys.noteOff (r.keys); }
+        if (r.keys >= 0) { keysDown[r.keys] = false; if (sustain) heldBySustainKeys[r.keys] = true; else { keys.noteOff (r.keys); sampler.noteOff (r.keys); } }
         if (r.syn >= 0) { synDown[r.syn] = false; if (sustain) heldBySustainSyn[r.syn] = true; else synth.noteOff (r.syn); }
         r = Routed {};
     }
@@ -123,7 +186,7 @@ void AmariKeysProcessor::handleMidi (const juce::MidiMessage& m)
         sustain = false;
         for (int i = 0; i < 128; ++i)
         {
-            if (heldBySustainKeys[i] && ! keysDown[i]) keys.noteOff (i);
+            if (heldBySustainKeys[i] && ! keysDown[i]) { keys.noteOff (i); sampler.noteOff (i); }
             if (heldBySustainSyn[i] && ! synDown[i]) synth.noteOff (i);
             heldBySustainKeys[i] = heldBySustainSyn[i] = false;
         }
@@ -137,6 +200,7 @@ void AmariKeysProcessor::handleMidi (const juce::MidiMessage& m)
 void AmariKeysProcessor::renderSegment (int start, int num)
 {
     organ.render (orgMono.getWritePointer (0) + start, num);
+    sampler.render (keysBuf.getWritePointer (0) + start, keysBuf.getWritePointer (1) + start, num);
     keys.render (keysBuf.getWritePointer (0) + start, keysBuf.getWritePointer (1) + start, num);
     synth.render (synBuf.getWritePointer (0) + start, synBuf.getWritePointer (1) + start, num);
     drums.render (padBuf.getWritePointer (0) + start, padBuf.getWritePointer (1) + start, num);
@@ -154,9 +218,19 @@ void AmariKeysProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::M
 
     keyboardState.processNextMidiBuffer (midi, 0, n, true);
 
+    {   // pick up a freshly loaded sample set without blocking
+        const juce::SpinLock::ScopedTryLockType l (swapLock);
+        if (l.isLocked() && pendingSet != nullptr && retiredSet == nullptr)
+        {
+            retiredSet = std::move (liveSet);
+            liveSet = std::move (pendingSet);
+            sampler.setSet (liveSet.get());
+        }
+    }
+
     if (panicRequest.exchange (false))
     {
-        organ.allOff(); keys.allOff(); synth.allOff(); drums.allOff();
+        organ.allOff(); keys.allOff(); synth.allOff(); drums.allOff(); sampler.allOff();
         for (auto& c : routed) for (auto& r : c) r = Routed {};
         for (int i = 0; i < 128; ++i) keysDown[i] = synDown[i] = heldBySustainKeys[i] = heldBySustainSyn[i] = false;
         sustain = false;
@@ -333,7 +407,12 @@ void AmariKeysProcessor::getStateInformation (juce::MemoryBlock& destData)
 void AmariKeysProcessor::setStateInformation (const void* data, int sizeInBytes)
 {
     if (auto xml = getXmlFromBinary (data, sizeInBytes))
-        if (xml->hasTagName (apvts.state.getType())) apvts.replaceState (juce::ValueTree::fromXml (*xml));
+        if (xml->hasTagName (apvts.state.getType()))
+        {
+            apvts.replaceState (juce::ValueTree::fromXml (*xml));
+            const juce::File f (apvts.state.getProperty ("samplePath").toString());
+            if (f.exists() && (liveSet == nullptr || liveSet->sourcePath != f.getFullPathName())) loadSamples (f);
+        }
 }
 
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter() { return new AmariKeysProcessor(); }

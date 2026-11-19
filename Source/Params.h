@@ -8,7 +8,7 @@ using APVTS = juce::AudioProcessorValueTreeState;
 inline juce::StringArray rotarySpeeds() { return { "SLOW", "FAST", "STOP" }; }
 inline juce::StringArray vibModes()     { return { "OFF", "V1", "V2", "V3", "C1", "C2", "C3" }; }
 inline juce::StringArray organModels()  { return { "B3", "VOX", "FARF", "PIPE" }; }
-inline juce::StringArray keysModels()   { return { "TINE EP", "REED EP", "CLAV", "FM BELL" }; }
+inline juce::StringArray keysModels()   { return { "TINE EP", "REED EP", "CLAV", "FM BELL", "MY SAMPLES" }; }
 inline juce::StringArray timbres()      { return { "SOFT", "MID", "BRIGHT" }; }
 inline juce::StringArray voiceModes()   { return { "POLY", "MONO", "LEGATO" }; }
 inline juce::StringArray waves()        { return { "SAW", "SQR", "TRI", "SINE" }; }

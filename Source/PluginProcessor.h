@@ -7,12 +7,13 @@
 #include "Keys.h"
 #include "Synth.h"
 #include "Drums.h"
+#include "Sampler.h"
 
-class AmariKeysProcessor : public juce::AudioProcessor
+class AmariKeysProcessor : public juce::AudioProcessor, private juce::Timer
 {
 public:
     AmariKeysProcessor();
-    ~AmariKeysProcessor() override = default;
+    ~AmariKeysProcessor() override;
 
     void prepareToPlay (double sampleRate, int samplesPerBlock) override;
     void releaseResources() override {}
@@ -44,6 +45,11 @@ public:
     // UI -> audio
     void triggerPad (int pad, float vel) { if (pad >= 0 && pad < DrumEngine::numPads) padRequests[pad].store (vel); }
     void panic() { panicRequest.store (true); }
+    // sample loading (MY SAMPLES)
+    void loadSamples (const juce::File& folderOrSfz);
+    juce::String getSampleStatus() const { const juce::ScopedLock l (statusLock); return sampleStatus; }
+    juce::String getSampleName() const { const juce::ScopedLock l (statusLock); return sampleName; }
+    bool isLoadingSamples() const { return loading.load(); }
     // audio -> UI (pad flash counters)
     std::atomic<int> padHits[DrumEngine::numPads] {};
 
@@ -54,7 +60,16 @@ private:
 
     float param (const char* id) const { return apvts.getRawParameterValue (id)->load(); }
 
+    void timerCallback() override;
     OrganEngine organ; RotarySpeaker rotary;
+    SamplerEngine sampler;
+    std::unique_ptr<SampleSet> liveSet, pendingSet, retiredSet;
+    juce::SpinLock swapLock;
+    juce::ThreadPool loaderPool { 1 };
+    std::atomic<bool> loading { false };
+    juce::CriticalSection statusLock;
+    juce::String sampleStatus { "No samples loaded" }, sampleName;
+    std::shared_ptr<std::atomic<bool>> alive = std::make_shared<std::atomic<bool>> (true);
     KeysEngine keys; SynthEngine synth; DrumEngine drums;
 
     std::atomic<float> padRequests[DrumEngine::numPads] {};

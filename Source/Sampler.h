@@ -3,6 +3,8 @@
 #include "DspCommon.h"
 #include <map>
 #include <set>
+#include <algorithm>
+#include <cmath>
 
 // ============================================================================
 // A loaded multisample instrument (16-bit in memory to keep big pianos manageable)
@@ -20,7 +22,7 @@ struct SampleSet
     juce::String name, sourcePath;
     std::vector<std::unique_ptr<SampleZone>> zones;
     int numLayers = 1, lowNote = 127, highNote = 0;
-    juce::String mappingInfo;
+    juce::String mappingInfo, mappingReport;
     size_t bytes = 0;
 
     const SampleZone* find (int note, int vel) const
@@ -75,6 +77,9 @@ struct SampleLoader
         for (auto& t : tokens)
         {
             for (int d = 0; d < 8; ++d) if (t == dyn[d]) layer = d;
+            if (t == "soft" || t == "quiet") layer = 1;
+            else if (t == "med" || t == "medium" || t == "mid") layer = 3;
+            else if (t == "loud" || t == "hard") layer = 6;
             if (t.startsWith ("vel") && t.substring (3).containsOnly ("0123456789") && t.length() > 3) layer = t.substring (3).getIntValue();
             else if (t.startsWith ("v") && t.length() > 1 && t.substring (1).containsOnly ("0123456789")) layer = t.substring (1).getIntValue();
         }
@@ -139,57 +144,182 @@ struct SampleLoader
         return set;
     }
 
+    // ------------------------------------------------------------------------
+    // Pitch detection (YIN) on a short window just after the attack.
+    // Returns a fractional MIDI note, or -1 when the sample has no clear pitch.
+    static float detectPitch (const SampleZone& z)
+    {
+        const double sr = z.sourceRate;
+        const int ch = z.channels;
+        auto mono = [&] (int i) { float v = 0; for (int c = 0; c < ch; ++c) v += (float) z.data[(size_t) i * (size_t) ch + (size_t) c]; return v / (float) ch; };
+
+        const int scan = juce::jmin (z.length, (int) (sr * 0.5));
+        int peakPos = 0; float peak = 0;
+        for (int i = 0; i < scan; ++i) { const float v = std::abs (mono (i)); if (v > peak) { peak = v; peakPos = i; } }
+        if (peak < 60.0f) return -1.0f; // silent
+
+        const int tauMin = juce::jmax (2, (int) (sr / 4600.0)); // up to ~C8
+        const int tauMax = (int) (sr / 25.0);                    // down to ~A0
+        const int W = (tauMax * 3) / 2;
+        int start = peakPos + (int) (sr * 0.03);                 // skip the hammer noise
+        if (start + W + tauMax + 2 > z.length) start = z.length - (W + tauMax + 2);
+        if (start < 0) return -1.0f;
+
+        std::vector<float> x ((size_t) (W + tauMax + 2));
+        for (size_t i = 0; i < x.size(); ++i) x[i] = mono (start + (int) i);
+
+        std::vector<double> d ((size_t) tauMax + 2, 0.0), cm ((size_t) tauMax + 2, 1.0);
+        auto diff = [&] (int tau) { double s = 0; for (int j = 0; j < W; ++j) { const double e = x[(size_t) j] - x[(size_t) (j + tau)]; s += e * e; } return s; };
+
+        double running = 0; int best = -1; double bestVal = 1e9;
+        for (int tau = 1; tau <= tauMax + 1; ++tau)
+        {
+            d[(size_t) tau] = diff (tau);
+            running += d[(size_t) tau];
+            cm[(size_t) tau] = running > 0 ? d[(size_t) tau] * tau / running : 1.0;
+            if (tau <= tauMin) continue;
+            const int prev = tau - 1;
+            if (prev > tauMin && cm[(size_t) prev] < 0.15 && cm[(size_t) tau] >= cm[(size_t) prev]) { best = prev; break; } // first dip under threshold
+            if (cm[(size_t) tau] < bestVal && tau <= tauMax) { bestVal = cm[(size_t) tau]; }
+        }
+        if (best < 0)
+        {
+            // no dip under the threshold: accept the global minimum only if it is reasonably clear
+            for (int tau = tauMin + 1; tau <= tauMax; ++tau) if (cm[(size_t) tau] == bestVal) { best = tau; break; }
+            if (best < 0 || bestVal > 0.35) return -1.0f;
+        }
+        double t = best;
+        if (best > 1 && best < tauMax + 1)
+        {
+            const double a = d[(size_t) best - 1], b = d[(size_t) best], c = d[(size_t) best + 1];
+            const double den = a - 2.0 * b + c;
+            if (std::abs (den) > 1e-12) t += 0.5 * (a - c) / den;
+        }
+        const double f = sr / t;
+        return (float) (69.0 + 12.0 * std::log2 (f / 440.0));
+    }
+
+    static float wrap12 (float v) { v = std::fmod (v, 12.0f); if (v > 6.0f) v -= 12.0f; if (v < -6.0f) v += 12.0f; return v; }
+
     static void loadFolder (juce::AudioFormatManager& fm, const juce::File& dir, SampleSet& set, juce::String& message, std::function<void (float)> progress)
     {
-        struct Item { juce::File f; int note, layer; };
-        std::vector<Item> items; int skipped = 0;
+        struct Item { juce::File f; int named = -1, layer = -1, note = -1; float heard = -1.0f; std::unique_ptr<SampleZone> z; };
+        std::vector<juce::File> files; int skipped = 0;
         for (const auto& e : juce::RangedDirectoryIterator (dir, true, "*", juce::File::findFiles))
         {
             const auto f = e.getFile();
             if (! isAudio (f)) continue;
             const auto stem = f.getFileNameWithoutExtension().toLowerCase();
             if (stem.contains ("rel") || stem.contains ("harm") || stem.contains ("pedal") || stem.contains ("noise")) { ++skipped; continue; }
-            int note, layer;
-            if (parseFileName (f.getFileNameWithoutExtension(), note, layer)) items.push_back ({ f, note, layer });
-            else ++skipped;
+            files.push_back (f);
         }
-        if (items.empty()) { message = "No file names with a note (e.g. C4, F#2, 060) were found"; return; }
+        if (files.empty()) { message = "No audio files (wav, aif, flac, ogg) found in this folder"; return; }
+        std::sort (files.begin(), files.end(), [] (const juce::File& a, const juce::File& b) { return a.getFileName().compareNatural (b.getFileName()) < 0; });
 
-        // velocity layers: sorted distinct layer ids, soft -> loud
+        // 1) read every file, parse its name and listen to its pitch
+        std::vector<Item> items;
+        int done = 0;
+        for (auto& f : files)
+        {
+            Item it; it.f = f;
+            parseFileName (f.getFileNameWithoutExtension(), it.named, it.layer);
+            it.z = readZone (fm, f, set.bytes);
+            progress (0.95f * (float) ++done / (float) files.size());
+            if (! it.z) { ++skipped; continue; }
+            it.heard = detectPitch (*it.z);
+            if (it.named < 0 && it.heard < 0) { set.bytes -= it.z->data.size() * sizeof (int16_t); ++skipped; continue; }
+            items.push_back (std::move (it));
+        }
+        if (items.empty()) { message = "No samples with a note in the name or a clear pitch were found"; return; }
+
+        // 2) decide how to map: trust the names, names with a fixed shift / reversed, or the heard pitch
+        std::vector<std::pair<float, float>> pairs; // named, heard
+        for (auto& it : items) if (it.named >= 0 && it.heard >= 0) pairs.push_back ({ (float) it.named, it.heard });
+        auto fitFor = [&] (int sign, float offset)
+        {
+            if (pairs.empty()) return 0.0f;
+            int ok = 0;
+            for (auto& p : pairs) if (std::abs (wrap12 (p.second - (sign * p.first + offset))) <= 1.0f) ++ok;
+            return (float) ok / (float) pairs.size();
+        };
+        auto medianOffset = [&] (int sign)
+        {
+            std::vector<float> r; for (auto& p : pairs) r.push_back (p.second - sign * p.first);
+            std::nth_element (r.begin(), r.begin() + (long) r.size() / 2, r.end());
+            return (float) std::round (r[r.size() / 2]);
+        };
+        int sign = 1; float offset = 0.0f; bool byPitch = false;
+        juce::String how;
+        const int namedCount = (int) std::count_if (items.begin(), items.end(), [] (const Item& i) { return i.named >= 0; });
+        if (pairs.size() >= 4)
+        {
+            const float fitNames = fitFor (1, 0.0f);
+            const float offUp = medianOffset (1), offRev = medianOffset (-1);
+            const float fitUp = fitFor (1, offUp), fitRev = fitFor (-1, offRev);
+            if (fitNames >= 0.6f) how = "file names (pitch-checked " + juce::String (juce::roundToInt (fitNames * 100)) + "% match)";
+            else if (fitUp >= 0.6f && fitUp >= fitRev) { offset = offUp; how = "file names shifted " + juce::String (offUp > 0 ? "+" : "") + juce::String ((int) offUp) + " semitones (names did not match the audio)"; }
+            else if (fitRev >= 0.6f) { sign = -1; offset = offRev; how = "file names REVERSED (names ran high-to-low against the audio)"; }
+            else { byPitch = true; how = "detected pitch (file names did not match the audio)"; }
+        }
+        else if (namedCount == 0) { byPitch = true; how = "detected pitch (no note names in the files)"; }
+        else how = "file names (too few clear pitches to check)";
+
+        for (auto& it : items)
+        {
+            if (! byPitch && it.named >= 0) it.note = sign * it.named + (int) offset;
+            else if (it.heard >= 0) it.note = juce::roundToInt (it.heard);
+            else it.note = it.named;
+            it.note = juce::jlimit (0, 127, it.note);
+        }
+
+        // 3) velocity layers (soft -> loud) and key ranges between neighbouring roots
         std::vector<int> layers;
         for (auto& it : items) if (std::find (layers.begin(), layers.end(), it.layer) == layers.end()) layers.push_back (it.layer);
         std::sort (layers.begin(), layers.end());
         const int L = (int) layers.size();
         set.numLayers = L;
 
-        int done = 0;
+        juce::String report;
+        report << "Amari Keys sample mapping - " << dir.getFullPathName() << "\n"
+               << "Mapped by: " << how << "\n\n"
+               << "file  ->  plays as  |  name says  |  audio sounds like\n";
         for (int li = 0; li < L; ++li)
         {
             std::vector<Item*> layerItems;
             for (auto& it : items) if (it.layer == layers[(size_t) li]) layerItems.push_back (&it);
-            std::sort (layerItems.begin(), layerItems.end(), [] (Item* a, Item* b) { return a->note < b->note; });
-            const int lovel = 1 + (127 * li) / L, hivel = (127 * (li + 1)) / L;
-            for (size_t k = 0; k < layerItems.size(); ++k)
+            std::stable_sort (layerItems.begin(), layerItems.end(), [] (Item* a, Item* b) { return a->note < b->note; });
+            std::vector<Item*> uniq;
+            for (auto* it : layerItems)
             {
-                auto* it = layerItems[k];
-                if (k > 0 && layerItems[k - 1]->note == it->note) continue; // duplicate (round robin) - keep first
-                auto z = readZone (fm, it->f, set.bytes);
-                progress ((float) ++done / (float) items.size());
-                if (! z) { ++skipped; continue; }
+                if (! uniq.empty() && uniq.back()->note == it->note) { set.bytes -= it->z->data.size() * sizeof (int16_t); it->z.reset(); continue; } // round robin - keep first
+                uniq.push_back (it);
+            }
+            const int lovel = 1 + (127 * li) / L, hivel = (127 * (li + 1)) / L;
+            report << "\n[velocity layer " << (li + 1) << " of " << L << ", vel " << lovel << "-" << hivel << "]\n";
+            for (size_t k = 0; k < uniq.size(); ++k)
+            {
+                auto* it = uniq[k];
+                auto z = std::move (it->z);
                 z->root = it->note;
-                z->lokey = k == 0 ? 0 : (layerItems[k - 1]->note + it->note) / 2 + 1;
-                z->hikey = k + 1 == layerItems.size() ? 127 : (it->note + layerItems[k + 1]->note) / 2;
+                z->lokey = k == 0 ? 0 : (uniq[k - 1]->note + it->note) / 2 + 1;
+                z->hikey = k + 1 == uniq.size() ? 127 : (it->note + uniq[k + 1]->note) / 2;
                 z->lovel = lovel; z->hivel = hivel;
+                report << it->f.getFileName() << "  ->  " << juce::MidiMessage::getMidiNoteName (it->note, true, true, 4)
+                       << "  |  " << (it->named >= 0 ? juce::MidiMessage::getMidiNoteName (it->named, true, true, 4) : juce::String ("-"))
+                       << "  |  " << (it->heard >= 0 ? juce::MidiMessage::getMidiNoteName (juce::roundToInt (it->heard), true, true, 4) : juce::String ("?")) << "\n";
                 set.zones.push_back (std::move (z));
             }
         }
+        progress (1.0f);
         message = juce::String (set.zones.size()) + " samples, " + juce::String (L) + (L == 1 ? " layer" : " layers")
                 + (skipped > 0 ? " (" + juce::String (skipped) + " skipped)" : juce::String());
-        // report how the lowest and highest files were read, so a naming problem is easy to spot
+
         auto lo = std::min_element (items.begin(), items.end(), [] (const Item& a, const Item& b) { return a.note < b.note; });
         auto hi = std::max_element (items.begin(), items.end(), [] (const Item& a, const Item& b) { return a.note < b.note; });
-        set.mappingInfo = lo->f.getFileName() + " = " + juce::MidiMessage::getMidiNoteName (lo->note, true, true, 4) + ",  "
+        set.mappingInfo = "Mapped by " + how + "  |  " + lo->f.getFileName() + " = " + juce::MidiMessage::getMidiNoteName (lo->note, true, true, 4) + ",  "
                         + hi->f.getFileName() + " = " + juce::MidiMessage::getMidiNoteName (hi->note, true, true, 4);
+        set.mappingReport = report;
+        if (dir.getChildFile ("AmariKeys_mapping.txt").replaceWithText (report)) set.mappingInfo << "  |  details: AmariKeys_mapping.txt";
     }
 
     static void loadSfz (juce::AudioFormatManager& fm, const juce::File& sfz, SampleSet& set, juce::String& message, std::function<void (float)> progress)

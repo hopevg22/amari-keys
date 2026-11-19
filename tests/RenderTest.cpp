@@ -64,7 +64,7 @@ int main (int argc, char** argv)
     auto fresh = [] { return std::make_unique<AmariKeysProcessor>(); };
 
     { // organ: gospel progression, rotary slow -> fast -> slow
-        auto p = fresh(); setP (*p, "split_on", 0); setP (*p, "keys_on", 0); setP (*p, "syn_on", 0);
+        auto p = fresh(); setP (*p, "split_on", 0); setP (*p, "l1_on", 0); setP (*p, "l3_on", 1);
         std::vector<Ev> e;
         chord (e, 0.2, 2.8, { 48, 52, 55, 60, 64 }); chord (e, 3.0, 2.8, { 53, 57, 60, 65, 69 });
         chord (e, 5.9, 2.8, { 55, 59, 62, 67, 71 }); chord (e, 8.8, 3.0, { 48, 52, 55, 60, 64 });
@@ -72,7 +72,7 @@ int main (int argc, char** argv)
         render (*p, e, 13.0, outDir.getChildFile ("01_organ_B3_rotary.wav"), [&] (double t) { setP (*p, "rot_speed", (t > 4.0 && t < 9.0) ? 1.0f : 0.0f); });
     }
     { // tine EP
-        auto p = fresh(); setP (*p, "split_on", 0); setP (*p, "org_on", 0); setP (*p, "syn_on", 0); setP (*p, "keys_trem", 0.35f);
+        auto p = fresh(); setP (*p, "split_on", 0); setP (*p, "l3_on", 0); setP (*p, "l1_model", 0); setP (*p, "l1_trem", 0.35f);
         std::vector<Ev> e;
         chord (e, 0.1, 1.9, { 50, 57, 60, 65 }, 0.55f); chord (e, 2.0, 1.9, { 55, 59, 62, 65 }, 0.75f);
         chord (e, 4.0, 3.5, { 48, 55, 59, 64 }, 0.95f);
@@ -82,7 +82,7 @@ int main (int argc, char** argv)
         const char* names[3] = { "03_keys_reed_ep.wav", "04_keys_clav.wav", "05_keys_fm_bell.wav" };
         for (int m = 1; m <= 3; ++m)
         {
-            auto p = fresh(); setP (*p, "split_on", 0); setP (*p, "org_on", 0); setP (*p, "syn_on", 0); setP (*p, "keys_model", (float) m);
+            auto p = fresh(); setP (*p, "split_on", 0); setP (*p, "l3_on", 0); setP (*p, "l1_model", (float) m);
             std::vector<Ev> e;
             const int seq[8] = { 60, 63, 65, 67, 70, 67, 65, 63 };
             for (int i = 0; i < 8; ++i) chord (e, 0.1 + i * 0.3, m == 2 ? 0.18 : 0.28, { seq[i] }, 0.5f + 0.06f * i);
@@ -91,13 +91,13 @@ int main (int argc, char** argv)
         }
     }
     { // synth pad
-        auto p = fresh(); setP (*p, "split_on", 0); setP (*p, "org_on", 0); setP (*p, "keys_on", 0);
+        auto p = fresh(); setP (*p, "split_on", 0); setP (*p, "l3_on", 0); setP (*p, "l1_on", 0); setP (*p, "l7_on", 1);
         std::vector<Ev> e;
         chord (e, 0.1, 3.5, { 57, 60, 64, 67 }, 0.7f); chord (e, 3.8, 3.5, { 53, 57, 60, 64 }, 0.7f);
         render (*p, e, 10.0, outDir.getChildFile ("06_synth_pad.wav"));
     }
     { // drums beat on ch 10
-        auto p = fresh();
+        auto p = fresh(); setP (*p, "pad_mode", 0);
         std::vector<Ev> e;
         const double step = 60.0 / 96.0 / 4.0;
         for (int bar = 0; bar < 4; ++bar)
@@ -113,7 +113,7 @@ int main (int argc, char** argv)
         render (*p, e, 0.1 + 64 * step + 2.5, outDir.getChildFile ("07_pads_drum_kit.wav"));
     }
     { // split: organ left hand, EP + pad right hand
-        auto p = fresh(); setP (*p, "mix_syn", 0.35f);
+        auto p = fresh(); setP (*p, "l1_model", 0); setP (*p, "l5_on", 1); setP (*p, "l5_level", 0.4f);
         std::vector<Ev> e;
         chord (e, 0.1, 3.8, { 36, 43, 46 }, 0.8f); chord (e, 0.1, 1.8, { 60, 64, 67, 70 }, 0.8f); chord (e, 2.0, 1.9, { 62, 65, 69, 72 }, 0.7f);
         chord (e, 4.0, 3.8, { 41, 45, 48 - 1 }, 0.8f); chord (e, 4.0, 3.8, { 60, 65, 69, 72 }, 0.85f);
@@ -158,12 +158,13 @@ int main (int argc, char** argv)
 
         for (int mode = 0; mode < 2; ++mode)
         {
-            auto p = fresh(); setP (*p, "split_on", 0); setP (*p, "org_on", 0); setP (*p, "syn_on", 0);
+            auto p = fresh(); setP (*p, "split_on", 0); setP (*p, "l3_on", 0);
             p->setPlayConfigDetails (0, 2, 48000.0, 256); p->prepareToPlay (48000.0, 256);
-            p->loadSamples (mode == 0 ? dir : dir.getChildFile ("test.sfz"));
+            p->loadSamples (0, mode == 0 ? dir : dir.getChildFile ("test.sfz"));
             while (p->isLoadingSamples()) Thread::sleep (20);
-            std::cout << (mode == 0 ? "folder: " : "sfz: ") << p->getSampleName() << " | " << p->getSampleStatus() << std::endl;
-            setP (*p, "keys_model", 4.0f);
+            std::cout << (mode == 0 ? "folder: " : "sfz: ") << p->getSampleName (0) << " | " << p->getSampleStatus (0) << std::endl;
+            setP (*p, "l1_model", 4.0f);
+            { MidiBuffer mb; AudioBuffer<float> b (2, 256); p->processBlock (b, mb); } // pick up the pending set
             std::vector<Ev> e;
             chord (e, 0.1, 1.5, { 48, 55, 60, 64 }, 0.4f); chord (e, 1.8, 1.5, { 50, 57, 62, 65 }, 0.95f);
             render (*p, e, 4.0, outDir.getChildFile (mode == 0 ? "09_sampler_folder.wav" : "10_sampler_sfz.wav"));

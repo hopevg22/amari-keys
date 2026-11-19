@@ -22,3 +22,13 @@ Folder files are mapped by the note in their name: `Piano_C4_v2.wav`, `A0v1.flac
 Velocity layers come from `v1`, `v2`… or `pp/p/mp/mf/f/ff` (soft → loud). Gaps between sampled notes are filled by repitching the nearest sample.
 Files with release / harmonics / pedal / noise in the name are skipped. Samples are held in memory as 16-bit (max 30 s each).
 The loaded path is saved with the session and reloads automatically.
+
+## Build 0.3 — layers, programs, new look
+- 8 layer groups with a fader each in the LAYER MIXER: PIANO, E.PIANO, ORGAN, KEYS, STRINGS, BRASS, PADS, SYNTH.
+  LED button = layer on/off, fader = level, zone tag (click) = LO / UP / ALL. Click a channel to edit it.
+- KEYS EDIT panel follows the selected PIANO / E.PIANO / KEYS layer; SYNTH EDIT follows STRINGS / BRASS / PADS / SYNTH.
+  Every layer can load its own samples (LOAD FOLDER / LOAD SFZ).
+- Programs: 16 slots (bank 1-4 x A-D). STORE saves the current sound to the selected slot; double-click the display to rename.
+- Drum pads 1A-4D: DRUM (16 drums), PROG (pad = program 1A..4D), MIX (top row = programs A-D of the current bank, rest = drums).
+  MIDI channel 10 notes 36-51 play pads 1A-4D.
+- MIDI LEARN: turn it on, click any control, move a knob/slider on your controller.

@@ -267,7 +267,10 @@ private:
         if (pluginWindow) { pluginWindow.reset(); updateButtons(); return; }
         if (! plugin) return;
         if (auto* ed = plugin->createEditorIfNeeded())
-            pluginWindow = std::make_unique<PluginWindow> (ed, [this] { MessageManager::callAsync ([sp = SafePointer<MainComponent> (this)] { if (sp) { sp->pluginWindow.reset(); sp->updateButtons(); } }); });
+        {
+            SafePointer<MainComponent> sp (this);
+            pluginWindow = std::make_unique<PluginWindow> (ed, [sp] { MessageManager::callAsync ([sp] { if (sp) { sp->pluginWindow.reset(); sp->updateButtons(); } }); });
+        }
         else log ("This plugin has no editor window.");
         updateButtons();
     }

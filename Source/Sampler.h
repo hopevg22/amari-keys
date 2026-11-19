@@ -20,6 +20,7 @@ struct SampleSet
     juce::String name, sourcePath;
     std::vector<std::unique_ptr<SampleZone>> zones;
     int numLayers = 1, lowNote = 127, highNote = 0;
+    juce::String mappingInfo;
     size_t bytes = 0;
 
     const SampleZone* find (int note, int vel) const
@@ -77,10 +78,11 @@ struct SampleLoader
             if (t.startsWith ("vel") && t.substring (3).containsOnly ("0123456789") && t.length() > 3) layer = t.substring (3).getIntValue();
             else if (t.startsWith ("v") && t.length() > 1 && t.substring (1).containsOnly ("0123456789")) layer = t.substring (1).getIntValue();
         }
-        // tokens like "c4v12" / "a#3v2" / "c4" / "060"
+        // pass 1: note-name tokens like "c4v12" / "a#3v2" / "c4" / "db3" (a letter note always wins over plain numbers)
         for (int ti = tokens.size(); --ti >= 0;)
         {
             auto t = tokens[ti];
+            if (t.containsOnly ("0123456789")) continue;
             const int vpos = t.lastIndexOfChar ('v');
             if (vpos > 0 && t.substring (vpos + 1).containsOnly ("0123456789") && t.length() > vpos + 1)
             {
@@ -88,8 +90,13 @@ struct SampleLoader
                 if (nn >= 0) { note = nn; layer = t.substring (vpos + 1).getIntValue(); return true; }
             }
             const int nn = parseNoteName (t);
-            if (nn >= 0 && ! (t.containsOnly ("0123456789") && t.length() < 2)) { note = nn; return true; }
+            if (nn >= 0) { note = nn; return true; }
         }
+        // pass 2: a plain MIDI note number ("060", "60") - only if it is the only number in the name
+        int numericCount = 0, numericValue = -1;
+        for (auto& t : tokens)
+            if (t.containsOnly ("0123456789") && t.length() >= 2) { ++numericCount; numericValue = t.getIntValue(); }
+        if (numericCount == 1 && numericValue >= 0 && numericValue <= 127) { note = numericValue; return true; }
         return false;
     }
 
@@ -178,6 +185,11 @@ struct SampleLoader
         }
         message = juce::String (set.zones.size()) + " samples, " + juce::String (L) + (L == 1 ? " layer" : " layers")
                 + (skipped > 0 ? " (" + juce::String (skipped) + " skipped)" : juce::String());
+        // report how the lowest and highest files were read, so a naming problem is easy to spot
+        auto lo = std::min_element (items.begin(), items.end(), [] (const Item& a, const Item& b) { return a.note < b.note; });
+        auto hi = std::max_element (items.begin(), items.end(), [] (const Item& a, const Item& b) { return a.note < b.note; });
+        set.mappingInfo = lo->f.getFileName() + " = " + juce::MidiMessage::getMidiNoteName (lo->note, true, true, 4) + ",  "
+                        + hi->f.getFileName() + " = " + juce::MidiMessage::getMidiNoteName (hi->note, true, true, 4);
     }
 
     static void loadSfz (juce::AudioFormatManager& fm, const juce::File& sfz, SampleSet& set, juce::String& message, std::function<void (float)> progress)

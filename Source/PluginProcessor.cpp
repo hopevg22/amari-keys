@@ -63,6 +63,7 @@ void AmariKeysProcessor::loadSamples (int layer, const juce::File& source)
         {
             msg << "  |  " << Params::noteName (set->lowNote) << " to " << Params::noteName (set->highNote)
                 << "  |  " << juce::roundToInt ((double) set->bytes / (1024.0 * 1024.0)) << " MB";
+            if (set->mappingInfo.isNotEmpty()) msg << "  |  " << set->mappingInfo;
             const juce::SpinLock::ScopedLockType l (swapLock);
             layers[layer].pending = std::move (set);
         }

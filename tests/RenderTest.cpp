@@ -122,7 +122,7 @@ int main (int argc, char** argv)
 
     // ---- sampler: name parsing
     {
-        const char* names[] = { "Piano_C4_v2", "A0v1", "C#4v16", "Db3_mf", "060", "Grand-F#2-ff", "Rhodes C3", "release_C4", "noise" };
+        const char* names[] = { "Piano C4 001", "001 Piano C4", "Grand_A0_064", "Piano 088", "Piano_01_C1", "Piano_C4_v2", "A0v1", "C#4v16", "Db3_mf", "060", "Grand-F#2-ff", "Rhodes C3", "release_C4", "noise" };
         for (auto* nm : names)
         {
             int note, layer; const bool ok = SampleLoader::parseFileName (nm, note, layer);
@@ -171,6 +171,22 @@ int main (int argc, char** argv)
         }
     }
 
+    // UI snapshot with samples loaded (for the guide)
+    {
+        File src = outDir.getChildFile ("testsamples");
+        File dir = outDir.getChildFile ("MyGrandPiano"); dir.deleteRecursively(); src.copyDirectoryTo (dir);
+        auto p = fresh();
+        p->setPlayConfigDetails (0, 2, 48000.0, 256); p->prepareToPlay (48000.0, 256);
+        p->loadSamples (0, dir);
+        while (p->isLoadingSamples()) Thread::sleep (20);
+        { MidiBuffer mb; AudioBuffer<float> b (2, 256); p->processBlock (b, mb); }
+        std::unique_ptr<AudioProcessorEditor> ed (p->createEditor());
+        ed->setSize (AmariKeysEditor::baseW, AmariKeysEditor::baseH);
+        auto img = ed->createComponentSnapshot (ed->getLocalBounds(), true, 1.0f);
+        File f = outDir.getChildFile ("ui_loaded.png"); f.deleteFile();
+        FileOutputStream fos (f); PNGImageFormat png; png.writeImageToStream (img, fos);
+        ed.reset();
+    }
     // UI snapshot
     {
         auto p = fresh();

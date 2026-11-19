@@ -32,3 +32,9 @@ The loaded path is saved with the session and reloads automatically.
 - Drum pads 1A-4D: DRUM (16 drums), PROG (pad = program 1A..4D), MIX (top row = programs A-D of the current bank, rest = drums).
   MIDI channel 10 notes 36-51 play pads 1A-4D.
 - MIDI LEARN: turn it on, click any control, move a knob/slider on your controller.
+
+## Amari Sampler (tools)
+`AmariSampler/` is a small Windows app that loads any VST3 instrument, plays it note by note at several velocities,
+trims each note and saves `Name_C#4_v3.wav` files plus `Name.sfz` - ready for LOAD SFZ / LOAD FOLDER in Amari Keys.
+CI artifact: **AmariSampler-Windows**. Engine: `AmariSampler/MultiSampleRenderer.h` (round-trip test: `tests/SamplerRoundTrip.cpp`).
+Personal use only: respect each instrument's licence and never share sampled sounds.

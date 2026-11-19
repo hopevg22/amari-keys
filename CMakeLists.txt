@@ -62,3 +62,31 @@ if(AMARI_BUILD_TESTS)
     target_link_libraries(AmariKeysTest PRIVATE juce::juce_audio_utils juce::juce_dsp juce::juce_audio_formats
         PUBLIC juce::juce_recommended_config_flags)
 endif()
+
+# Amari Sampler: standalone app that records a VST3 instrument into a multisample folder + SFZ
+juce_add_gui_app(AmariSampler
+    PRODUCT_NAME "Amari Sampler"
+    COMPANY_NAME "Amari Labs"
+    VERSION 0.1.0)
+target_sources(AmariSampler PRIVATE AmariSampler/Main.cpp)
+target_compile_definitions(AmariSampler PRIVATE
+    JUCE_PLUGINHOST_VST3=1
+    JUCE_WEB_BROWSER=0
+    JUCE_USE_CURL=0
+    JUCE_APPLICATION_NAME_STRING="Amari Sampler"
+    JUCE_APPLICATION_VERSION_STRING="0.1.0")
+target_link_libraries(AmariSampler
+    PRIVATE
+        juce::juce_audio_utils
+        juce::juce_audio_processors
+    PUBLIC
+        juce::juce_recommended_config_flags
+        juce::juce_recommended_warning_flags)
+
+# Offline round-trip test for the sampler engine (renders a test synth, then loads the result). Not built in CI.
+if(AMARI_BUILD_TESTS)
+    juce_add_console_app(SamplerRoundTrip PRODUCT_NAME "SamplerRoundTrip")
+    target_sources(SamplerRoundTrip PRIVATE tests/SamplerRoundTrip.cpp)
+    target_compile_definitions(SamplerRoundTrip PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0)
+    target_link_libraries(SamplerRoundTrip PRIVATE juce::juce_audio_processors juce::juce_audio_formats juce::juce_events)
+endif()

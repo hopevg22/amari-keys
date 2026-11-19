@@ -12,7 +12,7 @@ jobs:
       - name: Configure
         run: cmake -B build -A x64
       - name: Build
-        run: cmake --build build --config Release --target AmariKeys_VST3 AmariKeys_Standalone --parallel
+        run: cmake --build build --config Release --target AmariKeys_VST3 AmariKeys_Standalone AmariSampler --parallel
       - name: Upload VST3
         uses: actions/upload-artifact@v4
         with:
@@ -24,4 +24,10 @@ jobs:
         with:
           name: AmariKeys-Windows-Standalone
           path: build/AmariKeys_artefacts/Release/Standalone/
+          retention-days: 7
+      - name: Upload Amari Sampler
+        uses: actions/upload-artifact@v4
+        with:
+          name: AmariSampler-Windows
+          path: build/AmariSampler_artefacts/Release/
           retention-days: 7

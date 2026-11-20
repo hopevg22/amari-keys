@@ -4,6 +4,9 @@ on:
   push:
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   windows:
     runs-on: windows-latest
@@ -31,3 +34,16 @@ jobs:
           name: AmariSampler-Windows
           path: build/AmariSampler_artefacts/Release/
           retention-days: 7
+      - name: Publish to the "latest-build" release (for downloading outside GitHub Actions)
+        if: github.ref == 'refs/heads/main'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          Compress-Archive -Path "build/AmariKeys_artefacts/Release/VST3/*" -DestinationPath AmariKeys-VST3.zip -Force
+          Compress-Archive -Path "build/AmariKeys_artefacts/Release/Standalone/*" -DestinationPath AmariKeys-Standalone.zip -Force
+          Compress-Archive -Path "build/AmariSampler_artefacts/Release/*" -DestinationPath AmariSampler.zip -Force
+          gh release view latest-build *> $null
+          if ($LASTEXITCODE -ne 0) { gh release create latest-build --prerelease --title "Latest build" --notes "Automatic build from main" }
+          gh release upload latest-build AmariKeys-VST3.zip AmariKeys-Standalone.zip AmariSampler.zip --clobber
+          gh release edit latest-build --notes "Automatic build from main, commit ${{ github.sha }}"

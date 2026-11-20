@@ -10,7 +10,7 @@ AmariKeysProcessor::AmariKeysProcessor()
 {
     for (auto& c : ccMap) c.store (-1);
     paramList = getParameters();
-    for (int i = 0; i < numPrograms; ++i) programs[(size_t) i].name = "INIT";
+    patches = AmariLibrary::loadPatches();
     startTimerHz (30);
 }
 
@@ -38,81 +38,213 @@ void AmariKeysProcessor::timerCallback()
     }
     // program change requested from a MIDI pad
     const int req = programRequest.exchange (-1);
-    if (req >= 0) recallProgram (req);
+    if (req >= 0 && req < getPatchCount()) recallPatch (req);
 }
 
 void AmariKeysProcessor::loadSamples (int layer, const juce::File& source)
 {
-    int expected = -1;
-    if (! loadingLayer.compare_exchange_strong (expected, layer)) return;
+    // Requests are queued on one loader thread (never dropped). A newer request for the
+    // same layer replaces an older one that hasn't started yet.
+    if (layer < 0 || layer >= numLayers) return;
+    juce::uint32 serial;
+    {
+        const juce::ScopedLock l (statusLock);
+        serial = ++loadSerial[layer];
+        layers[layer].status = (isLoadingSamples() ? "Waiting to load " : "Loading ") + source.getFileName() + " ...";
+    }
+    ++queuedLoads;
+    loaderPool.addJob ([this, layer, source, serial]
+    {
+        --queuedLoads;
+        runLoad (layer, source, serial);
+    });
+}
+
+void AmariKeysProcessor::clearSamples (int layer)
+{
+    if (layer < 0 || layer >= numLayers) return;
+    {
+        const juce::ScopedLock l (statusLock);
+        ++loadSerial[layer];
+        layers[layer].status = "No samples loaded"; layers[layer].name = {}; layers[layer].path = {};
+    }
+    layers[layer].clearRequest.store (true);
+    layers[layer].hasSet.store (false);
+    apvts.state.removeProperty ("samplePath_l" + juce::String (layer + 1), nullptr);
+}
+
+void AmariKeysProcessor::runLoad (int layer, juce::File source, juce::uint32 serial)
+{
+    {
+        const juce::ScopedLock l (statusLock);
+        if (serial != loadSerial[layer]) return; // superseded by a newer request
+    }
+    loadingLayer.store (layer);
     {
         const juce::ScopedLock l (statusLock);
         layers[layer].status = "Loading " + source.getFileName() + " ...";
     }
-    loaderPool.addJob ([this, layer, source]
+    juce::String msg;
+    auto set = SampleLoader::load (source, msg, [this, layer, source] (float p)
     {
-        juce::String msg;
-        auto set = SampleLoader::load (source, msg, [this, layer, source] (float p)
-        {
-            const juce::ScopedLock l (statusLock);
-            layers[layer].status = "Loading " + source.getFileName() + "  " + juce::String (juce::roundToInt (p * 100.0f)) + "%";
-        });
-        const bool ok = set != nullptr;
-        const juce::String name = ok ? set->name : juce::String();
-        if (ok)
-        {
-            msg << "  |  " << Params::noteName (set->lowNote) << " to " << Params::noteName (set->highNote)
-                << "  |  " << juce::roundToInt ((double) set->bytes / (1024.0 * 1024.0)) << " MB";
-            if (set->mappingInfo.isNotEmpty()) msg << "  |  " << set->mappingInfo;
-            const juce::SpinLock::ScopedLockType l (swapLock);
-            layers[layer].pending = std::move (set);
-        }
-        {
-            const juce::ScopedLock l (statusLock);
-            layers[layer].status = ok ? msg : "Load failed: " + msg;
-            if (ok) { layers[layer].name = name; layers[layer].path = source.getFullPathName(); }
-        }
-        if (ok)
-        {
-            layers[layer].hasSet.store (true);
-            const auto path = source.getFullPathName();
-            juce::MessageManager::callAsync ([this, path, layer, token = alive]
-            {
-                if (! token->load()) return;
-                apvts.state.setProperty ("samplePath_l" + juce::String (layer + 1), path, nullptr);
-                const auto kind = Params::kindOf (layer);
-                if (kind == Kind::Keys) { if (auto* prm = apvts.getParameter (lid (layer, "model"))) prm->setValueNotifyingHost (prm->convertTo0to1 (4.0f)); }
-                else if (kind == Kind::Synth) { if (auto* prm = apvts.getParameter (lid (layer, "src"))) prm->setValueNotifyingHost (1.0f); }
-            });
-        }
-        loadingLayer.store (-1);
+        const juce::ScopedLock l (statusLock);
+        layers[layer].status = "Loading " + source.getFileName() + "  " + juce::String (juce::roundToInt (p * 100.0f)) + "%";
     });
+    bool superseded;
+    { const juce::ScopedLock l (statusLock); superseded = serial != loadSerial[layer]; }
+    if (superseded) { loadingLayer.store (-1); return; }
+
+    const bool ok = set != nullptr;
+    const juce::String name = ok ? set->name : juce::String();
+    if (ok)
+    {
+        msg << "  |  " << Params::noteName (set->lowNote) << " to " << Params::noteName (set->highNote)
+            << "  |  " << juce::roundToInt ((double) set->bytes / (1024.0 * 1024.0)) << " MB";
+        if (set->mappingInfo.isNotEmpty()) msg << "  |  " << set->mappingInfo;
+        // wait (briefly) until the audio thread has taken any previous pending set
+        for (int i = 0; i < 200; ++i)
+        {
+            { const juce::SpinLock::ScopedLockType l (swapLock); if (layers[layer].pending == nullptr) { layers[layer].pending = std::move (set); break; } }
+            juce::Thread::sleep (10);
+        }
+        if (set != nullptr) { const juce::SpinLock::ScopedLockType l (swapLock); layers[layer].pending = std::move (set); }
+    }
+    {
+        const juce::ScopedLock l (statusLock);
+        layers[layer].status = ok ? msg : "Load failed: " + msg;
+        if (ok) { layers[layer].name = name; layers[layer].path = source.getFullPathName(); }
+    }
+    if (ok)
+    {
+        layers[layer].hasSet.store (true);
+        const auto path = source.getFullPathName();
+        juce::MessageManager::callAsync ([this, path, layer, token = alive]
+        {
+            if (! token->load()) return;
+            apvts.state.setProperty ("samplePath_l" + juce::String (layer + 1), path, nullptr);
+            const auto kind = Params::kindOf (layer);
+            if (kind == Kind::Keys) { if (auto* prm = apvts.getParameter (lid (layer, "model"))) prm->setValueNotifyingHost (prm->convertTo0to1 (4.0f)); }
+            else if (kind == Kind::Synth) { if (auto* prm = apvts.getParameter (lid (layer, "src"))) prm->setValueNotifyingHost (1.0f); }
+        });
+    }
+    loadingLayer.store (-1);
 }
 
 //==============================================================================
-void AmariKeysProcessor::storeProgram (int index)
+static juce::ValueTree capturePatch (AmariKeysProcessor& p, const juce::Array<juce::AudioProcessorParameter*>& params, const juce::String& name)
 {
-    auto& p = programs[(size_t) index];
-    p.values.clear();
-    for (auto* prm : paramList)
+    juce::ValueTree t ("PATCH");
+    t.setProperty ("name", name, nullptr);
+    for (auto* prm : params)
         if (auto* r = dynamic_cast<juce::RangedAudioParameter*> (prm))
-            p.values.push_back ({ r->getParameterID(), r->getValue() });
-    if (p.name == "INIT")
+        {
+            juce::ValueTree v ("V"); v.setProperty ("id", r->getParameterID(), nullptr); v.setProperty ("v", r->getValue(), nullptr);
+            t.appendChild (v, nullptr);
+        }
+    for (int l = 0; l < AmariKeysProcessor::numLayers; ++l)
     {
-        juce::StringArray on;
-        for (int l = 0; l < numLayers; ++l) if (param (lid (l, "on")) > 0.5f) on.add (Params::layerShort (l));
-        p.name = on.joinIntoString (" + ");
+        const auto path = p.getSamplePath (l);
+        if (path.isEmpty()) continue;
+        juce::ValueTree snd ("SOUND");
+        snd.setProperty ("layer", l, nullptr); snd.setProperty ("path", path, nullptr); snd.setProperty ("name", p.getSampleName (l), nullptr);
+        t.appendChild (snd, nullptr);
     }
-    currentProgram.store (index);
+    return t;
 }
 
-void AmariKeysProcessor::recallProgram (int index)
+void AmariKeysProcessor::reloadPatches()
 {
-    currentProgram.store (index);
-    auto& p = programs[(size_t) index];
-    for (auto& v : p.values)
-        if (auto* prm = apvts.getParameter (v.first))
-            prm->setValueNotifyingHost (v.second);
+    patches = AmariLibrary::loadPatches();
+    if (currentPatch.load() >= getPatchCount()) currentPatch.store (-1);
+}
+
+void AmariKeysProcessor::recallPatch (int index)
+{
+    reloadPatches();
+    if (index < 0 || index >= getPatchCount()) return;
+    auto t = patches.getChild (index);
+    currentPatch.store (index);
+    apvts.state.setProperty ("patchName", t.getProperty ("name"), nullptr);
+    for (auto v : t)
+        if (v.hasType ("V"))
+            if (auto* prm = apvts.getParameter (v.getProperty ("id").toString()))
+                prm->setValueNotifyingHost ((float) v.getProperty ("v"));
+    // each layer's sound: load what the patch uses (skip if already loaded), unload layers it doesn't use
+    for (int l = 0; l < numLayers; ++l)
+    {
+        juce::String path;
+        for (auto snd : t) if (snd.hasType ("SOUND") && (int) snd.getProperty ("layer", -1) == l) path = snd.getProperty ("path").toString();
+        const auto current = getSamplePath (l);
+        if (path.isEmpty()) { if (current.isNotEmpty()) clearSamples (l); continue; }
+        const juce::File f (path);
+        if (! f.exists()) { const juce::ScopedLock lk (statusLock); layers[l].status = "Missing: " + path; continue; }
+        if (f.getFullPathName() != current) loadSamples (l, f);
+    }
+}
+
+bool AmariKeysProcessor::storePatch (int index)
+{
+    reloadPatches();
+    if (index < 0 || index >= getPatchCount()) return false;
+    const auto name = getPatchName (index);
+    auto fresh = capturePatch (*this, paramList, name);
+    patches.removeChild (index, nullptr);
+    patches.addChild (fresh, index, nullptr);
+    currentPatch.store (index);
+    return AmariLibrary::savePatches (patches);
+}
+
+int AmariKeysProcessor::savePatchAs (const juce::String& name)
+{
+    reloadPatches();
+    patches.appendChild (capturePatch (*this, paramList, name.trim().isEmpty() ? juce::String ("NEW PATCH") : name.trim()), nullptr);
+    const int idx = getPatchCount() - 1;
+    currentPatch.store (idx);
+    apvts.state.setProperty ("patchName", getPatchName (idx), nullptr);
+    AmariLibrary::savePatches (patches);
+    return idx;
+}
+
+void AmariKeysProcessor::renamePatch (int index, const juce::String& name)
+{
+    reloadPatches();
+    if (index < 0 || index >= getPatchCount() || name.trim().isEmpty()) return;
+    patches.getChild (index).setProperty ("name", name.trim(), nullptr);
+    if (index == currentPatch.load()) apvts.state.setProperty ("patchName", name.trim(), nullptr);
+    AmariLibrary::savePatches (patches);
+}
+
+void AmariKeysProcessor::deletePatch (int index)
+{
+    reloadPatches();
+    if (index < 0 || index >= getPatchCount()) return;
+    patches.removeChild (index, nullptr);
+    const int cur = currentPatch.load();
+    if (cur == index) currentPatch.store (-1); else if (cur > index) currentPatch.store (cur - 1);
+    AmariLibrary::savePatches (patches);
+}
+
+// Programs from builds up to 0.4 (16 slots inside the project) move into the library once.
+void AmariKeysProcessor::migrateOldPrograms (const juce::ValueTree& progs)
+{
+    if (! progs.isValid()) return;
+    reloadPatches();
+    bool changed = false;
+    for (auto p : progs)
+    {
+        if (p.getNumChildren() == 0) continue;
+        const int i = (int) p.getProperty ("index", 0);
+        auto name = p.getProperty ("name", "INIT").toString();
+        if (name == "INIT") name = "PROGRAM " + juce::String (i / 4 + 1) + juce::String::charToString ((juce::juce_wchar) ('A' + i % 4));
+        bool exists = false;
+        for (auto q : patches) if (q.getProperty ("name").toString() == name) exists = true;
+        if (exists) continue;
+        juce::ValueTree t ("PATCH"); t.setProperty ("name", name, nullptr);
+        for (auto v : p) { juce::ValueTree c ("V"); c.setProperty ("id", v.getProperty ("id"), nullptr); c.setProperty ("v", v.getProperty ("v"), nullptr); t.appendChild (c, nullptr); }
+        patches.appendChild (t, nullptr);
+        changed = true;
+    }
+    if (changed) AmariLibrary::savePatches (patches);
 }
 
 void AmariKeysProcessor::padPressed (int pad, float vel)
@@ -120,7 +252,7 @@ void AmariKeysProcessor::padPressed (int pad, float vel)
     const int mode = (int) param ("pad_mode");
     if (mode == 1 || (mode == 2 && pad < 4))
     {
-        recallProgram (mode == 1 ? pad : (getCurrentProgramIndex() / 4) * 4 + pad);
+        recallPatch (mode == 1 ? pad : (juce::jmax (0, getCurrentPatch()) / 4) * 4 + pad);
         padHits[pad]++;
         return;
     }
@@ -134,7 +266,7 @@ void AmariKeysProcessor::triggerPadAudio (int pad, float vel)
     const int mode = (int) param ("pad_mode");
     if (mode == 1 || (mode == 2 && pad < 4))
     {
-        programRequest.store (mode == 1 ? pad : (currentProgram.load() / 4) * 4 + pad);
+        programRequest.store (mode == 1 ? pad : (juce::jmax (0, currentPatch.load()) / 4) * 4 + pad);
         padHits[pad]++;
         return;
     }
@@ -194,7 +326,7 @@ void AmariKeysProcessor::updateSettings()
     o.percOn = param ("perc_on") > 0.5f; o.perc3rd = param ("perc_3rd") > 0.5f;
     o.percFast = param ("perc_fast") > 0.5f; o.percSoft = param ("perc_soft") > 0.5f;
     o.click = param ("org_click"); o.vibMode = (int) param ("vib_mode"); o.drive = param ("org_drive");
-    rotary.setSpeed ((int) param ("rot_speed"));
+    rotary.setSpeed (wheelMod.load() > 0.5f ? 1 : (int) param ("rot_speed")); // mod wheel up = rotary FAST
 
     for (int l = 0; l < numLayers; ++l)
     {
@@ -314,6 +446,7 @@ void AmariKeysProcessor::handleMidi (const juce::MidiMessage& m)
             return;
         }
         if (m.isAllNotesOff() || m.isAllSoundOff()) { panic(); return; }
+        if (cc == 1) wheelMod.store ((float) val / 127.0f); // mod wheel (can also be MIDI-learned below)
         if (learnMode.load() && learnTarget.load() >= 0)
         {
             for (auto& c : ccMap) if (c.load() == learnTarget.load()) c.store (-1);
@@ -327,8 +460,11 @@ void AmariKeysProcessor::handleMidi (const juce::MidiMessage& m)
     }
     else if (m.isPitchWheel())
     {
-        const float bend = (float) (m.getPitchWheelValue() - 8192) / 8192.0f * 2.0f;
-        for (auto& L : layers) L.synth.s.pitchBend = bend;
+        wheelBend.store (juce::jlimit (-1.0f, 1.0f, (float) (m.getPitchWheelValue() - 8192) / 8191.0f));
+    }
+    else if (m.isProgramChange())
+    {
+        programRequest.store (m.getProgramChangeNumber());
     }
 }
 
@@ -365,12 +501,21 @@ void AmariKeysProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::M
         const juce::SpinLock::ScopedTryLockType l (swapLock);
         if (l.isLocked())
             for (auto& L : layers)
+            {
+                if (L.clearRequest.load() && L.retired == nullptr)
+                {
+                    L.clearRequest.store (false);
+                    L.sampler.allOff();
+                    L.retired = std::move (L.live);
+                    L.sampler.setSet (nullptr);
+                }
                 if (L.pending != nullptr && L.retired == nullptr)
                 {
                     L.retired = std::move (L.live);
                     L.live = std::move (L.pending);
                     L.sampler.setSet (L.live.get());
                 }
+            }
     }
 
     if (panicRequest.exchange (false))
@@ -388,6 +533,15 @@ void AmariKeysProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::M
     }
 
     updateSettings();
+
+    {   // pitch bend + mod wheel vibrato for every sound except the tonewheel organ
+        const float mod = wheelMod.load();
+        const double vibDepth = 0.45 * mod * mod;                    // up to +/- 0.45 semitone
+        const double semis = wheelBend.load() * param ("bend_range") + vibDepth * std::sin (vibPhase);
+        vibPhase = std::fmod (vibPhase + juce::MathConstants<double>::twoPi * 5.6 * n / sr, juce::MathConstants<double>::twoPi);
+        const double mul = std::pow (2.0, semis / 12.0);
+        for (auto& L : layers) { L.sampler.pitchMul = mul; L.keys.s.pitchMul = mul; L.synth.s.pitchBend = (float) semis; }
+    }
 
     orgMono.clear(); padBuf.clear(); fxBuf.clear();
     for (auto& L : layers) L.buf.clear();
@@ -540,21 +694,7 @@ void AmariKeysProcessor::getStateInformation (juce::MemoryBlock& destData)
 {
     auto state = apvts.copyState();
     state.removeChild (state.getChildWithName ("PROGRAMS"), nullptr);
-    juce::ValueTree progs ("PROGRAMS");
-    progs.setProperty ("current", currentProgram.load(), nullptr);
-    for (int i = 0; i < numPrograms; ++i)
-    {
-        juce::ValueTree p ("PROG");
-        p.setProperty ("index", i, nullptr);
-        p.setProperty ("name", programs[(size_t) i].name, nullptr);
-        for (auto& v : programs[(size_t) i].values)
-        {
-            juce::ValueTree pv ("V"); pv.setProperty ("id", v.first, nullptr); pv.setProperty ("v", v.second, nullptr);
-            p.appendChild (pv, nullptr);
-        }
-        progs.appendChild (p, nullptr);
-    }
-    state.appendChild (progs, nullptr);
+    state.setProperty ("patchIndex", currentPatch.load(), nullptr);
     juce::String map;
     for (int c = 0; c < 128; ++c)
         if (ccMap[c].load() >= 0)
@@ -573,18 +713,17 @@ void AmariKeysProcessor::setStateInformation (const void* data, int sizeInBytes)
     tree.removeChild (progs, nullptr);
     apvts.replaceState (tree);
 
-    if (progs.isValid())
+    migrateOldPrograms (progs);
+    reloadPatches();
     {
-        currentProgram.store ((int) progs.getProperty ("current", 0));
-        for (auto p : progs)
-        {
-            const int i = (int) p.getProperty ("index", -1);
-            if (i < 0 || i >= numPrograms) continue;
-            auto& prog = programs[(size_t) i];
-            prog.name = p.getProperty ("name", "INIT").toString();
-            prog.values.clear();
-            for (auto v : p) prog.values.push_back ({ v.getProperty ("id").toString(), (float) v.getProperty ("v") });
+        int idx = (int) apvts.state.getProperty ("patchIndex", -1);
+        const auto nm = apvts.state.getProperty ("patchName").toString();
+        if (idx >= getPatchCount() || (idx >= 0 && nm.isNotEmpty() && getPatchName (idx) != nm))
+        {   // the list changed since this project was saved: find the patch by name
+            idx = -1;
+            for (int i = 0; i < getPatchCount(); ++i) if (getPatchName (i) == nm) { idx = i; break; }
         }
+        currentPatch.store (idx);
     }
     for (auto& c : ccMap) c.store (-1);
     juce::StringArray pairs; pairs.addTokens (apvts.state.getProperty ("ccmap").toString(), ";", "");
@@ -604,12 +743,7 @@ void AmariKeysProcessor::setStateInformation (const void* data, int sizeInBytes)
         if (f.exists() && layers[l].path != f.getFullPathName())
         {
             const int layer = l;
-            juce::Timer::callAfterDelay (200 + 300 * l, [this, layer, f, token = alive]
-            {
-                if (! token->load()) return;
-                if (isLoadingSamples()) { juce::Timer::callAfterDelay (1500, [this, layer, f, token] { if (token->load()) loadSamples (layer, f); }); return; }
-                loadSamples (layer, f);
-            });
+            loadSamples (layer, f); // queued - loads one after the other
         }
     }
 }

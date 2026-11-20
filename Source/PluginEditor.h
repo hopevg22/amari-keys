@@ -136,6 +136,25 @@ private:
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> faderAtt;
     juce::Rectangle<int> zoneArea;
 };
+// Pitch bend / modulation wheel. Drag up and down; the pitch wheel springs back to the centre.
+class Wheel : public juce::Component, private juce::Timer
+{
+public:
+    Wheel (bool isPitch, juce::String label) : pitch (isPitch), caption (std::move (label)) {}
+    std::function<void (float)> onChange;      // pitch -1..1, mod 0..1
+    void setDisplayed (float v) { if (! dragging && std::abs (v - value) > 0.002f) { value = v; repaint(); } }
+    void paint (juce::Graphics&) override;
+    void mouseDown (const juce::MouseEvent&) override;
+    void mouseDrag (const juce::MouseEvent&) override;
+    void mouseUp (const juce::MouseEvent&) override;
+    void mouseDoubleClick (const juce::MouseEvent&) override { set (0.0f); }
+private:
+    void timerCallback() override;
+    void set (float v) { value = v; repaint(); if (onChange) onChange (v); }
+    bool pitch; juce::String caption;
+    float value = 0.0f, startValue = 0.0f; bool dragging = false;
+    juce::Rectangle<float> wheelArea() const { return getLocalBounds().toFloat().withTrimmedBottom (16.0f).reduced (4.0f, 2.0f); }
+};
 } // namespace ak
 
 class AmariKeysEditor : public juce::AudioProcessorEditor, private juce::Timer
@@ -147,13 +166,18 @@ public:
     void resized() override;
     void mouseDown (const juce::MouseEvent&) override;
 
-    static constexpr int baseW = 1720, baseH = 640;
+    static constexpr int baseW = 1840, baseH = 640;
 
 private:
     void timerCallback() override;
     void selectLayer (int layer);
     void paintContent (juce::Graphics&);
     void chooseSamples (bool sfz, int layer);
+    void showSoundsMenu (int layer, juce::Component& anchor);
+    void saveSound (int layer);
+    void showPatchMenu();
+    void askName (const juce::String& title, const juce::String& message, const juce::String& initial, std::function<void (juce::String)> done);
+    void stepPatch (int delta);
 
     struct Content : public juce::Component
     {
@@ -178,11 +202,13 @@ private:
     ak::PadButton* pads[AmariKeysProcessor::numPads] {};
     int lastPadHits[AmariKeysProcessor::numPads] {};
     ak::ChannelStrip* strips[AmariKeysProcessor::numLayers] {};
-    juce::TextButton bankButtons[4], slotButtons[4];
+    juce::TextButton prevPatch { "<" }, nextPatch { ">" }, browsePatch { "BROWSE" }, saveAsPatch { "SAVE AS" }, renamePatchBtn { "RENAME" }, deletePatchBtn { "DELETE" };
     juce::TextButton storeButton { "STORE" }, panicButton { "PANIC" }, learnButton { "MIDI LEARN" };
-    juce::TextButton keysLoadFolder { "LOAD FOLDER" }, keysLoadSfz { "LOAD SFZ" }, synLoadFolder { "LOAD FOLDER" }, synLoadSfz { "LOAD SFZ" };
-    juce::Slider splitNote, transpose;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> splitAtt, transAtt;
+    juce::TextButton keysLoadFolder { "LOAD FOLDER" }, keysLoadSfz { "LOAD SFZ" }, synLoadFolder { "FOLDER" }, synLoadSfz { "SFZ" };
+    juce::TextButton keysSounds { "SOUNDS" }, keysSaveSound { "SAVE SOUND" }, synSounds { "SOUNDS" }, synSaveSound { "SAVE" };
+    juce::Slider splitNote, transpose, bendRange;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> splitAtt, transAtt, bendAtt;
+    ak::Wheel* pitchWheel = nullptr; ak::Wheel* modWheel = nullptr;
     std::unique_ptr<juce::FileChooser> chooser;
     ak::Lcd* progLcd = nullptr; ak::Lcd* keysLcd = nullptr; ak::Lcd* synLcd = nullptr;
 
@@ -192,6 +218,7 @@ private:
     juce::Array<juce::Rectangle<int>> rules;
     juce::Rectangle<int> zoneBar;
     int lastSplit = -1; bool lastSplitOn = false; int lastProgram = -1, lastLearnHits = 0;
+    juce::String lastStatus;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AmariKeysEditor)
 };

@@ -64,6 +64,7 @@ inline APVTS::ParameterLayout createLayout()
         AudioParameterIntAttributes().withStringFromValueFunction ([] (int v, int) { return noteName (v); })));
     in ("transpose", "Transpose", -12, 12, 0);
     ch ("vel_curve", "Velocity Curve", velCurves(), 1);
+    in ("bend_range", "Pitch Bend Range", 1, 12, 2);
 
     // ---- layers
     for (int l = 0; l < numLayers; ++l)

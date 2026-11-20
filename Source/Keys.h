@@ -9,6 +9,7 @@ struct KeysEngine
         int model = 0;       // 0 tine, 1 reed, 2 clav, 3 bell
         float timbre = 1.0f; // 0.6 soft, 1 mid, 1.5 bright
         float dynamics = 0.6f, decay = 0.5f, tremolo = 0.0f;
+        double pitchMul = 1.0; // pitch bend + vibrato
     } s;
 
     void prepare (double sampleRate) { sr = sampleRate; for (auto& v : voices) v.active = false; dcL = dcR = 0; }
@@ -49,7 +50,7 @@ struct KeysEngine
             const float velAmp = (1.0f - dyn) + dyn * v.vel;
             const float velIdx = 0.25f + 0.75f * v.vel;
             const float relCoef = (float) std::exp (-1.0 / (sr * (v.model == 2 ? 0.035 : v.model == 3 ? 0.4 : 0.11)));
-            const double f = v.freq, dt = 1.0 / sr;
+            const double f = v.freq * s.pitchMul, dt = 1.0 / sr;
             const float gl = std::sqrt (0.5f - 0.5f * v.pan), gr = std::sqrt (0.5f + 0.5f * v.pan);
             for (int i = 0; i < num; ++i)
             {

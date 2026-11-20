@@ -498,7 +498,9 @@ struct SampleLoader
 struct SamplerEngine
 {
     float dynamics = 0.6f, release = 0.3f; int timbre = 1;
-    static constexpr float outputGain = 2.0f; // with default layer level + master, a sample plays close to its recorded level
+    double pitchMul = 1.0; // pitch bend + vibrato, set once per block
+    // default PIANO level 0.8 x layer mix 0.65 x master 0.75 = 0.39 -> this makes a sample play at exactly its recorded level
+    static constexpr float outputGain = 1.0f / (0.8f * 0.65f * 0.75f);
 
     void prepare (double sampleRate) { sr = sampleRate; allOff(); }
     void setSet (const SampleSet* s) { set = s; allOff(); }
@@ -552,7 +554,7 @@ struct SamplerEngine
                 if (v.released) v.env *= v.fastRelease ? fastCoef : relCoef;
                 const float a = v.att * v.env * v.gain;
                 outL[i] += l * a; outR[i] += r * a;
-                v.pos += v.inc;
+                v.pos += v.inc * pitchMul;
             }
             if (v.env < 0.0002f) v.active = false;
             ++v.age;

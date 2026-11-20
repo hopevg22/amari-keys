@@ -355,6 +355,47 @@ void ChannelStrip::mouseDown (const MouseEvent& e)
     }
     if (onSelect) onSelect (layer);
 }
+// ---------------------------------------------------------------------------
+void Wheel::paint (Graphics& g)
+{
+    auto r = wheelArea();
+    g.setColour (col::well); g.fillRoundedRectangle (r, 4.0f);
+    g.setColour (col::border); g.drawRoundedRectangle (r, 4.0f, 1.0f);
+    auto w = r.reduced (5.0f, 6.0f);
+    // the wheel: shaded drum with ribs that roll with the value
+    ColourGradient grad (Colour (0xff141416), w.getX(), w.getY(), Colour (0xff141416), w.getX(), w.getBottom(), false);
+    grad.addColour (0.5, Colour (0xff3a3a3e));
+    g.setGradientFill (grad); g.fillRoundedRectangle (w, 3.0f);
+    const float travel = pitch ? value * 0.5f + 0.5f : value;  // 0..1 (bottom..top)
+    g.saveState(); g.reduceClipRegion (w.toNearestInt());
+    const float spacing = 9.0f, offset = std::fmod (travel * w.getHeight() * 1.2f, spacing);
+    for (float y = w.getY() - spacing + offset; y < w.getBottom() + spacing; y += spacing)
+    {
+        const float d = std::abs (y - w.getCentreY()) / (w.getHeight() * 0.5f);
+        g.setColour (Colours::black.withAlpha (0.35f + 0.4f * d)); g.fillRect (w.getX(), y, w.getWidth(), 1.6f);
+    }
+    g.restoreState();
+    // position marker (orange) and centre notch for the pitch wheel
+    const float my = w.getBottom() - travel * w.getHeight();
+    if (pitch) { g.setColour (col::dim); g.fillRect (w.getX() - 4.0f, w.getCentreY() - 0.5f, 3.0f, 1.0f); g.fillRect (w.getRight() + 1.0f, w.getCentreY() - 0.5f, 3.0f, 1.0f); }
+    g.setColour (col::acc); g.fillRoundedRectangle (w.getX() + 1.0f, jlimit (w.getY(), w.getBottom() - 4.0f, my - 2.0f), w.getWidth() - 2.0f, 4.0f, 1.5f);
+    g.setColour (col::muted); g.setFont (FontOptions (9.0f, Font::bold));
+    g.drawText (caption, getLocalBounds().removeFromBottom (14), Justification::centred, false);
+}
+
+void Wheel::mouseDown (const MouseEvent&) { stopTimer(); dragging = true; startValue = value; }
+void Wheel::mouseDrag (const MouseEvent& e)
+{
+    const float h = wheelArea().getHeight();
+    const float dv = -(float) e.getDistanceFromDragStartY() / h * (pitch ? 2.0f : 1.0f);
+    set (jlimit (pitch ? -1.0f : 0.0f, 1.0f, startValue + dv));
+}
+void Wheel::mouseUp (const MouseEvent&) { dragging = false; if (pitch) startTimerHz (60); }
+void Wheel::timerCallback() // spring back to the centre
+{
+    const float v = value * 0.6f;
+    if (std::abs (v) < 0.01f) { stopTimer(); set (0.0f); } else set (v);
+}
 } // namespace ak
 
 //==============================================================================
@@ -375,14 +416,14 @@ AmariKeysEditor::AmariKeysEditor (AmariKeysProcessor& p)
     auto styleBtn = [this] (TextButton& b, bool led) { b.getProperties().set ("led", led); content.addAndMakeVisible (b); };
 
     // ---------------- top bar ----------------
-    cap (1150, 14, 40, "SPLIT");
-    place (make<LedToggle> (s, "split_on", "ON"), 1190, 9, 44, 22);
+    cap (1270, 14, 40, "SPLIT");
+    place (make<LedToggle> (s, "split_on", "ON"), 1310, 9, 44, 22);
     splitNote.setSliderStyle (Slider::IncDecButtons);
     splitNote.setTextBoxStyle (Slider::TextBoxLeft, false, 40, 22);
-    content.addAndMakeVisible (splitNote); splitNote.setBounds (1240, 9, 88, 22);
+    content.addAndMakeVisible (splitNote); splitNote.setBounds (1360, 9, 88, 22);
     splitAtt = std::make_unique<AudioProcessorValueTreeState::SliderAttachment> (s, "split_note", splitNote);
-    cap (1350, 14, 60, "VELOCITY");
-    place (make<LedList> (s, "vel_curve", Params::velCurves(), 3), 1410, 12, 170, 16);
+    cap (1470, 14, 60, "VELOCITY");
+    place (make<LedList> (s, "vel_curve", Params::velCurves(), 3), 1530, 12, 170, 16);
 
     const int top = 48, H = 344;
     // ---------------- MASTER ----------------
@@ -407,11 +448,11 @@ AmariKeysEditor::AmariKeysEditor (AmariKeysProcessor& p)
     }
     // ---------------- ORGAN ----------------
     {
-        const int x = 118, w = 330; sec (x, top, w, H, "ORGAN");
+        const int x = 118, w = 450; sec (x, top, w, H, "ORGAN");
         const char* caps[9] = { "16'", "5 1/3", "8'", "4'", "2 2/3", "2'", "1 3/5", "1 1/3", "1'" };
         const bool light[9] = { false, false, true, true, false, true, false, false, true };
-        for (int i = 0; i < 9; ++i) place (make<Drawbar> (s, "db" + String (i + 1), caps[i], light[i]), x + 12 + i * 24, top + 42, 20, 200);
-        const int rx = x + 238;
+        for (int i = 0; i < 9; ++i) place (make<Drawbar> (s, "db" + String (i + 1), caps[i], light[i]), x + 16 + i * 30, top + 42, 22, 200);
+        const int rx = x + 320;
         cap (rx, top + 42, 80, "MODEL");
         place (make<LedList> (s, "org_model", Params::organModels(), 2), rx, top + 56, 82, 34);
         cap (rx, top + 100, 80, "PERCUSSION");
@@ -423,15 +464,16 @@ AmariKeysEditor::AmariKeysEditor (AmariKeysProcessor& p)
         place (make<LedList> (s, "vib_mode", Params::vibModes(), 3), rx, top + 184, 84, 54);
         place (make<Knob> (s, "org_click", "CLICK", 26), rx - 4, top + 250, 42, 44);
         place (make<Knob> (s, "org_drive", "DRIVE", 26), rx + 40, top + 250, 42, 44);
-        cap (x + 12, top + 262, 60, "ROTARY");
-        place (make<LedToggle> (s, "rot_on", "ON"), x + 64, top + 257, 42, 20);
-        place (make<LedList> (s, "rot_speed", Params::rotarySpeeds(), 3), x + 114, top + 259, 112, 16);
-        cap (x + 12, top + 298, 60, "OCTAVE");
-        place (make<LedList> (s, lid (2, "oct"), Params::octaves(), 5, -2), x + 64, top + 296, 162, 16);
+        cap (x + 16, top + 262, 60, "ROTARY");
+        place (make<LedToggle> (s, "rot_on", "ON"), x + 68, top + 257, 42, 20);
+        place (make<LedList> (s, "rot_speed", Params::rotarySpeeds(), 3), x + 120, top + 259, 150, 16);
+        cap (x + 16, top + 282, 260, "MOD WHEEL UP = ROTARY FAST");
+        cap (x + 16, top + 306, 60, "OCTAVE");
+        place (make<LedList> (s, lid (2, "oct"), Params::octaves(), 5, -2), x + 68, top + 304, 202, 16);
     }
     // ---------------- KEYS (follows PIANO / E.PIANO / KEYS) ----------------
     {
-        const int x = 454, w = 236; sec (x, top, w, H, "KEYS", 1);
+        const int x = 574, w = 236; sec (x, top, w, H, "KEYS", 1);
         keysLcd = make<Lcd>(); keysLcd->setBounds (x + 12, top + 40, w - 24, 40);
         keysLcd->text = [this]
         {
@@ -450,65 +492,79 @@ AmariKeysEditor::AmariKeysEditor (AmariKeysProcessor& p)
         auto* dyn = make<Knob> (s, lid (0, "dyn"), "DYNAMICS", 32); dyn->setBounds (x + 12, top + 168, 64, 54);
         auto* dec = make<Knob> (s, lid (0, "decay"), "DECAY", 32); dec->setBounds (x + 86, top + 168, 64, 54);
         auto* trem = make<Knob> (s, lid (0, "trem"), "TREMOLO", 32); trem->setBounds (x + 160, top + 168, 64, 54);
-        cap (x + 12, top + 236, 100, "MY SAMPLES");
-        styleBtn (keysLoadFolder, false); keysLoadFolder.setBounds (x + 12, top + 250, 104, 22);
-        styleBtn (keysLoadSfz, false); keysLoadSfz.setBounds (x + 120, top + 250, 104, 22);
+        cap (x + 12, top + 230, 100, "MY SAMPLES");
+        styleBtn (keysSounds, false); keysSounds.setBounds (x + 12, top + 244, 104, 22);
+        styleBtn (keysSaveSound, false); keysSaveSound.setBounds (x + 120, top + 244, 104, 22);
+        styleBtn (keysLoadFolder, false); keysLoadFolder.setBounds (x + 12, top + 270, 104, 22);
+        styleBtn (keysLoadSfz, false); keysLoadSfz.setBounds (x + 120, top + 270, 104, 22);
+        keysSounds.onClick = [this] { showSoundsMenu (keysLayer, keysSounds); };
+        keysSaveSound.onClick = [this] { saveSound (keysLayer); };
         keysLoadFolder.onClick = [this] { chooseSamples (false, keysLayer); };
         keysLoadSfz.onClick = [this] { chooseSamples (true, keysLayer); };
-        cap (x + 12, top + 290, 60, "OCTAVE");
-        auto* oct = make<LedList> (s, lid (0, "oct"), Params::octaves(), 5, -2); oct->setBounds (x + 64, top + 288, 160, 16);
+        cap (x + 12, top + 308, 60, "OCTAVE");
+        auto* oct = make<LedList> (s, lid (0, "oct"), Params::octaves(), 5, -2); oct->setBounds (x + 64, top + 306, 160, 16);
         keysControls = { { model, "model" }, { timbre, "timbre" }, { dyn, "dyn" }, { dec, "decay" }, { trem, "trem" }, { oct, "oct" } };
     }
     // ---------------- PROGRAM + LAYER MIXER ----------------
     {
-        const int x = 696, w = 360; sec (x, top, w, H, "PROGRAM");
+        const int x = 816, w = 360; sec (x, top, w, H, "PATCH");
         styleBtn (storeButton, false); storeButton.setBounds (x + w - 78, top + 6, 66, 22);
-        storeButton.onClick = [this] { proc.storeProgram (proc.getCurrentProgramIndex()); content.repaint(); };
+        storeButton.onClick = [this]
+        {
+            const int pi = proc.getCurrentPatch();
+            if (pi >= 0) { proc.storePatch (pi); content.repaint(); }
+            else askName ("Save patch", "Name for the new patch", "NEW PATCH", [this] (String n) { proc.savePatchAs (n); content.repaint(); });
+        };
         progLcd = make<Lcd>(); progLcd->big = true; progLcd->setBounds (x + 12, top + 40, w - 24, 56);
         progLcd->text = [this]
         {
-            const int pi = proc.getCurrentProgramIndex();
-            String l1 = AmariKeysProcessor::getProgramLabel (pi) + "  " + proc.getProgramNameAt (pi).toUpperCase();
+            const int pi = proc.getCurrentPatch(), count = proc.getPatchCount();
+            String l1 = pi >= 0 ? String (pi + 1).paddedLeft ('0', 3) + "  " + proc.getPatchName (pi).toUpperCase() : String ("---  NO PATCH");
             String l2;
             if (proc.isLearnMode())
             {
                 const auto t = proc.getLearnTargetName();
                 l2 = t.isEmpty() ? "LEARN: click a control" : "LEARN: move a hardware control for " + t;
             }
+            else if (pi < 0) l2 = count == 0 ? "SAVE AS to keep this sound as your first patch" : String (count) + " PATCHES  |  BROWSE or < > to pick one";
             else
             {
                 StringArray on;
                 for (int l = 0; l < AmariKeysProcessor::numLayers; ++l)
                     if (proc.apvts.getRawParameterValue (lid (l, "on"))->load() > 0.5f) on.add (Params::layerShort (l));
-                l2 = (on.isEmpty() ? String ("NO LAYERS ON") : on.joinIntoString (" + ")) + "   |   EDIT: " + Params::layerShort (selectedLayer);
-                if (! proc.programHasData (pi)) l2 = "EMPTY SLOT - press STORE to save here   |   double-click to rename";
+                l2 = (on.isEmpty() ? String ("NO LAYERS ON") : on.joinIntoString (" + ")) + "   |   " + String (pi + 1) + " OF " + String (count);
             }
             return std::make_pair (l1, l2);
         };
-        progLcd->onDoubleClick = [this]
+        progLcd->onDoubleClick = [this] { showPatchMenu(); };
+        auto pb = [this, &styleBtn] (TextButton& b, int bx, int bw) { styleBtn (b, false); b.setBounds (bx, 0, bw, 22); };
+        const int by = top + 104;
+        pb (prevPatch, x + 12, 26); pb (nextPatch, x + 42, 26); pb (browsePatch, x + 74, 70); pb (saveAsPatch, x + 150, 66);
+        pb (renamePatchBtn, x + 222, 62); pb (deletePatchBtn, x + 290, 58);
+        for (auto* b : { &prevPatch, &nextPatch, &browsePatch, &saveAsPatch, &renamePatchBtn, &deletePatchBtn }) b->setTopLeftPosition (b->getX(), by);
+        prevPatch.onClick = [this] { stepPatch (-1); };
+        nextPatch.onClick = [this] { stepPatch (1); };
+        browsePatch.onClick = [this] { showPatchMenu(); };
+        saveAsPatch.onClick = [this]
         {
-            auto* aw = new AlertWindow ("Program name", "Name for program " + AmariKeysProcessor::getProgramLabel (proc.getCurrentProgramIndex()), MessageBoxIconType::NoIcon);
-            aw->addTextEditor ("name", proc.getProgramNameAt (proc.getCurrentProgramIndex()));
-            aw->addButton ("OK", 1, KeyPress (KeyPress::returnKey));
-            aw->addButton ("Cancel", 0, KeyPress (KeyPress::escapeKey));
-            aw->setLookAndFeel (&laf);
-            aw->enterModalState (true, ModalCallbackFunction::create ([this, aw] (int r)
-            {
-                if (r == 1) { proc.setProgramNameAt (proc.getCurrentProgramIndex(), aw->getTextEditorContents ("name")); content.repaint(); }
-            }), true);
+            StringArray on;
+            for (int l = 0; l < AmariKeysProcessor::numLayers; ++l)
+                if (proc.apvts.getRawParameterValue (lid (l, "on"))->load() > 0.5f)
+                    on.add (proc.hasSamples (l) && proc.getSampleName (l).isNotEmpty() ? proc.getSampleName (l) : String (Params::layerShort (l)));
+            askName ("Save as new patch", "Name for the new patch", on.joinIntoString (" + "), [this] (String n) { proc.savePatchAs (n); content.repaint(); });
         };
-        cap (x + 12, top + 109, 40, "BANK");
-        for (int i = 0; i < 4; ++i)
+        renamePatchBtn.onClick = [this]
         {
-            bankButtons[i].setButtonText (String (i + 1)); styleBtn (bankButtons[i], true);
-            bankButtons[i].setBounds (x + 52 + i * 36, top + 104, 32, 22);
-            bankButtons[i].onClick = [this, i] { const int slot = proc.getCurrentProgramIndex() % 4; const int idx = i * 4 + slot;
-                                                 if (proc.programHasData (idx)) proc.recallProgram (idx); else proc.selectProgramSlot (idx); };
-            slotButtons[i].setButtonText (String::charToString ((juce_wchar) ('A' + i))); styleBtn (slotButtons[i], true);
-            slotButtons[i].setBounds (x + 208 + i * 36, top + 104, 32, 22);
-            slotButtons[i].onClick = [this, i] { const int bank = proc.getCurrentProgramIndex() / 4; const int idx = bank * 4 + i;
-                                                 if (proc.programHasData (idx)) proc.recallProgram (idx); else proc.selectProgramSlot (idx); };
-        }
+            const int pi = proc.getCurrentPatch(); if (pi < 0) return;
+            askName ("Rename patch", "New name for patch " + String (pi + 1), proc.getPatchName (pi), [this, pi] (String n) { proc.renamePatch (pi, n); content.repaint(); });
+        };
+        deletePatchBtn.onClick = [this]
+        {
+            const int pi = proc.getCurrentPatch(); if (pi < 0) return;
+            auto opts = MessageBoxOptions::makeOptionsOkCancel (MessageBoxIconType::QuestionIcon, "Delete patch",
+                "Delete patch " + String (pi + 1) + " \"" + proc.getPatchName (pi) + "\"? The sounds it uses are not deleted.", "Delete", "Keep", this);
+            AlertWindow::showAsync (opts, [this, pi] (int r) { if (r == 1) { proc.deletePatch (pi); content.repaint(); } });
+        };
         rules.add ({ x + 12, top + 136, w - 24, 1 });
         cap (x + 12, top + 142, 120, "LAYER MIXER");
         for (int l = 0; l < AmariKeysProcessor::numLayers; ++l)
@@ -520,7 +576,7 @@ AmariKeysEditor::AmariKeysEditor (AmariKeysProcessor& p)
     }
     // ---------------- SYNTH (follows STRINGS / BRASS / PADS / SYNTH) ----------------
     {
-        const int x = 1062, w = 384; sec (x, top, w, H, "SYNTH", 2);
+        const int x = 1182, w = 384; sec (x, top, w, H, "SYNTH", 2);
         auto* voice = make<LedList> (s, lid (4, "voice"), Params::voiceModes(), 3); voice->setBounds (x + 210, top + 11, 162, 16);
         synLcd = make<Lcd>(); synLcd->setBounds (x + 12, top + 38, w - 24, 36);
         synLcd->text = [this]
@@ -558,9 +614,13 @@ AmariKeysEditor::AmariKeysEditor (AmariKeysProcessor& p)
         auto* det = make<Knob> (s, lid (4, "detune"), "DETUNE", 24); det->setBounds (x + 48, top + 240, 40, 42);
         auto* gl = make<Knob> (s, lid (4, "glide"), "GLIDE", 24); gl->setBounds (x + 88, top + 240, 40, 42);
         auto* rate = make<Knob> (s, lid (4, "lforate"), "LFO RATE", 24); rate->setBounds (x + 8, top + 290, 44, 42);
-        cap (x + 66, top + 300, 100, "MY SAMPLES");
-        styleBtn (synLoadFolder, false); synLoadFolder.setBounds (x + 136, top + 294, 112, 22);
-        styleBtn (synLoadSfz, false); synLoadSfz.setBounds (x + 136, top + 318, 112, 22);
+        cap (x + 60, top + 300, 76, "MY SAMPLES");
+        styleBtn (synSounds, false); synSounds.setBounds (x + 136, top + 294, 58, 22);
+        styleBtn (synSaveSound, false); synSaveSound.setBounds (x + 198, top + 294, 58, 22);
+        styleBtn (synLoadFolder, false); synLoadFolder.setBounds (x + 136, top + 318, 58, 22);
+        styleBtn (synLoadSfz, false); synLoadSfz.setBounds (x + 198, top + 318, 58, 22);
+        synSounds.onClick = [this] { showSoundsMenu (synthLayer, synSounds); };
+        synSaveSound.onClick = [this] { saveSound (synthLayer); };
         synLoadFolder.onClick = [this] { chooseSamples (false, synthLayer); };
         synLoadSfz.onClick = [this] { chooseSamples (true, synthLayer); };
         cap (ex, top + 290, 60, "OCTAVE");
@@ -571,7 +631,7 @@ AmariKeysEditor::AmariKeysEditor (AmariKeysProcessor& p)
     }
     // ---------------- EFFECTS ----------------
     {
-        const int x = 1452, w = 260; sec (x, top, w, H, "EFFECTS");
+        const int x = 1572, w = 260; sec (x, top, w, H, "EFFECTS");
         place (make<LedList> (s, "fx_target", Params::fxTargets(), 4), x + 74, top + 11, 180, 16);
         struct B { const char* on; const char* name; const char* k[3]; const char* c[3]; const char* type; };
         const B blocks[6] = {
@@ -602,6 +662,19 @@ AmariKeysEditor::AmariKeysEditor (AmariKeysProcessor& p)
         }
         place (make<VSlider> (s, "pads_level", "LVL"), x + 210, y + 34, 28, 192);
     }
+    // ---------------- WHEELS ----------------
+    {
+        const int x = 262, y = 400, w = 112, h = 232; sec (x, y, w, h, "WHEELS");
+        pitchWheel = make<Wheel> (true, "PITCH"); pitchWheel->setBounds (x + 10, y + 34, 44, 150);
+        modWheel = make<Wheel> (false, "MOD"); modWheel->setBounds (x + 58, y + 34, 44, 150);
+        pitchWheel->onChange = [this] (float v) { proc.setPitchWheel (v); };
+        modWheel->onChange = [this] (float v) { proc.setModWheel (v); };
+        cap (x + 12, y + 190, 88, "BEND RANGE (ST)");
+        bendRange.setSliderStyle (Slider::IncDecButtons);
+        bendRange.setTextBoxStyle (Slider::TextBoxLeft, false, 30, 22);
+        content.addAndMakeVisible (bendRange); bendRange.setBounds (x + 12, y + 202, 88, 22);
+        bendAtt = std::make_unique<AudioProcessorValueTreeState::SliderAttachment> (s, "bend_range", bendRange);
+    }
     // ---------------- keyboard ----------------
     keyboard.setAvailableRange (21, 108);
     keyboard.setLowestVisibleKey (21);
@@ -614,7 +687,7 @@ AmariKeysEditor::AmariKeysEditor (AmariKeysProcessor& p)
     keyboard.setColour (MidiKeyboardComponent::shadowColourId, Colours::black.withAlpha (0.35f));
     keyboard.setOctaveForMiddleC (4);
     content.addAndMakeVisible (keyboard);
-    const int kx = 266, kw = baseW - 8 - kx;
+    const int kx = 380, kw = baseW - 8 - kx;
     keyboard.setKeyWidth ((float) kw / 52.0f);
     keyboard.setBounds (kx, 420, kw, 212);
     zoneBar = { kx, 400, kw, 16 };
@@ -636,7 +709,7 @@ AmariKeysEditor::~AmariKeysEditor()
     stopTimer();
     content.removeMouseListener (this);
     chooser.reset();
-    splitAtt.reset(); transAtt.reset();
+    splitAtt.reset(); transAtt.reset(); bendAtt.reset();
     owned.clear();
     content.setLookAndFeel (nullptr);
     setLookAndFeel (nullptr);
@@ -668,6 +741,130 @@ void AmariKeysEditor::chooseSamples (bool sfz, int layer)
     }
 }
 
+void AmariKeysEditor::askName (const String& title, const String& message, const String& initial, std::function<void (String)> done)
+{
+    auto* aw = new AlertWindow (title, message, MessageBoxIconType::NoIcon);
+    aw->addTextEditor ("name", initial);
+    aw->addButton ("OK", 1, KeyPress (KeyPress::returnKey));
+    aw->addButton ("Cancel", 0, KeyPress (KeyPress::escapeKey));
+    aw->setLookAndFeel (&laf);
+    aw->enterModalState (true, ModalCallbackFunction::create ([aw, done] (int r)
+    {
+        const auto n = aw->getTextEditorContents ("name").trim();
+        if (r == 1 && n.isNotEmpty() && done) done (n);
+    }), true);
+}
+
+void AmariKeysEditor::stepPatch (int delta)
+{
+    proc.reloadPatches();
+    const int count = proc.getPatchCount();
+    if (count == 0) return;
+    const int cur = proc.getCurrentPatch();
+    const int next = cur < 0 ? (delta > 0 ? 0 : count - 1) : (cur + delta + count) % count;
+    proc.recallPatch (next);
+    content.repaint();
+}
+
+void AmariKeysEditor::showPatchMenu()
+{
+    proc.reloadPatches();
+    PopupMenu m;
+    const int count = proc.getPatchCount(), cur = proc.getCurrentPatch();
+    if (count == 0) m.addItem (-1, "No patches yet - use SAVE AS", false);
+    for (int i = 0; i < count; ++i)
+        m.addItem (i + 1, String (i + 1).paddedLeft ('0', 3) + "   " + proc.getPatchName (i), true, i == cur);
+    m.addSeparator();
+    m.addItem (-2, "Library folder: " + AmariLibrary::root().getFullPathName(), false);
+    m.addItem (-3, "Change library folder...");
+    m.showMenuAsync (PopupMenu::Options().withTargetComponent (browsePatch).withMaximumNumColumns (3).withStandardItemHeight (20),
+                     [this] (int r)
+    {
+        if (r > 0) { proc.recallPatch (r - 1); content.repaint(); }
+        else if (r == -3)
+        {
+            chooser = std::make_unique<FileChooser> ("Choose the Amari Keys library folder (patches and sounds are kept in its Library subfolder)", AmariLibrary::root());
+            chooser->launchAsync (FileBrowserComponent::openMode | FileBrowserComponent::canSelectDirectories, [this] (const FileChooser& fc)
+            {
+                const auto d = fc.getResult();
+                if (d.isDirectory()) { AmariLibrary::setRoot (d); proc.reloadPatches(); content.repaint(); }
+            });
+        }
+    });
+}
+
+void AmariKeysEditor::showSoundsMenu (int layer, Component& anchor)
+{
+    const auto group = AmariLibrary::groupFolder (layer);
+    auto sounds = AmariLibrary::soundsFor (group);
+    const auto loaded = proc.getSamplePath (layer);
+    PopupMenu m;
+    m.addSectionHeader (String (Params::layerLong (layer)) + " SOUNDS");
+    int id = 1;
+    std::vector<AmariLibrary::Sound> table;
+    for (auto& snd : sounds)
+    {
+        m.addItem (id++, (snd.saved ? "" : "   ") + snd.name, true, File (snd.path) == File (loaded));
+        table.push_back (snd);
+    }
+    if (sounds.isEmpty()) m.addItem (-9, "No sounds yet. Load an SFZ, then SAVE SOUND", false);
+    // other groups
+    PopupMenu others;
+    for (int g = 0; g < AmariKeysProcessor::numLayers; ++g)
+    {
+        if (g == 2 || g == layer) continue; // organ has no samples
+        PopupMenu sub; bool any = false;
+        for (auto& snd : AmariLibrary::soundsFor (AmariLibrary::groupFolder (g))) { sub.addItem (id++, snd.name); table.push_back (snd); any = true; }
+        if (any) others.addSubMenu (AmariLibrary::groupFolder (g), sub);
+    }
+    m.addSeparator();
+    if (others.getNumItems() > 0) m.addSubMenu ("From other groups", others);
+    if (loaded.isNotEmpty()) m.addItem (-1, "Unload samples (use the built-in sound)");
+    m.addItem (-2, "Remove a saved sound...", true);
+    m.addItem (-4, "Library: " + AmariLibrary::root().getFullPathName(), false);
+    m.addItem (-3, "Change library folder...");
+    m.showMenuAsync (PopupMenu::Options().withTargetComponent (anchor).withStandardItemHeight (20), [this, layer, table] (int r)
+    {
+        if (r > 0 && r <= (int) table.size())
+        {
+            const File f (table[(size_t) r - 1].path);
+            if (f.exists()) proc.loadSamples (layer, f);
+            else AlertWindow::showAsync (MessageBoxOptions::makeOptionsOk (MessageBoxIconType::WarningIcon, "Sound not found", f.getFullPathName() + " no longer exists."), nullptr);
+        }
+        else if (r == -1) proc.clearSamples (layer);
+        else if (r == -3)
+        {
+            chooser = std::make_unique<FileChooser> ("Choose the Amari Keys library folder", AmariLibrary::root());
+            chooser->launchAsync (FileBrowserComponent::openMode | FileBrowserComponent::canSelectDirectories, [] (const FileChooser& fc)
+            { if (fc.getResult().isDirectory()) AmariLibrary::setRoot (fc.getResult()); });
+        }
+        else if (r == -2)
+        {
+            PopupMenu rm; int i = 1;
+            auto saved = AmariLibrary::savedSounds();
+            for (auto& snd : saved) rm.addItem (i++, snd.group + " / " + snd.name);
+            if (saved.isEmpty()) rm.addItem (-9, "No saved sounds", false);
+            rm.showMenuAsync (PopupMenu::Options(), [saved] (int k)
+            { if (k > 0 && k <= saved.size()) AmariLibrary::removeSound (saved[k - 1].group, saved[k - 1].path); });
+        }
+    });
+}
+
+void AmariKeysEditor::saveSound (int layer)
+{
+    const auto path = proc.getSamplePath (layer);
+    if (path.isEmpty())
+    {
+        AlertWindow::showAsync (MessageBoxOptions::makeOptionsOk (MessageBoxIconType::InfoIcon, "Save sound",
+            "Load an SFZ or sample folder on " + String (Params::layerLong (layer)) + " first, then save it to your library."), nullptr);
+        return;
+    }
+    auto initial = proc.getSampleName (layer);
+    if (initial.isEmpty()) initial = File (path).getFileNameWithoutExtension();
+    askName ("Save sound to library", "Name for this " + String (Params::layerLong (layer)) + " sound (always listed under SOUNDS)", initial,
+             [layer, path] (String n) { AmariLibrary::saveSound (n, layer, path); });
+}
+
 void AmariKeysEditor::mouseDown (const MouseEvent& e)
 {
     if (! proc.isLearnMode()) return;
@@ -695,7 +892,7 @@ void AmariKeysEditor::paintContent (Graphics& g)
     g.drawText ("A M A R I   K E Y S", 16, 0, 220, 40, Justification::centredLeft, false);
     drawLed (g, { 222.0f, 17.0f, 6.0f, 6.0f }, true);
     g.setColour (col::dim); g.setFont (FontOptions (9.0f, Font::bold));
-    g.drawText ("AMARI LABS  |  BUILD 0.3", 238, 0, 200, 40, Justification::centredLeft, false);
+    g.drawText ("AMARI LABS  |  BUILD 0.5", 238, 0, 200, 40, Justification::centredLeft, false);
 
     for (auto& s : sections)
     {
@@ -760,12 +957,10 @@ void AmariKeysEditor::timerCallback()
         if (h != lastPadHits[i]) { lastPadHits[i] = h; pads[i]->flash = 1.0f; pads[i]->repaint(); }
         else if (pads[i]->flash > 0.0f) { pads[i]->flash = jmax (0.0f, pads[i]->flash - 0.1f); pads[i]->repaint(); }
     }
-    const int pi = proc.getCurrentProgramIndex();
-    for (int i = 0; i < 4; ++i)
-    {
-        bankButtons[i].setToggleState (pi / 4 == i, dontSendNotification);
-        slotButtons[i].setToggleState (pi % 4 == i, dontSendNotification);
-    }
+    pitchWheel->setDisplayed (proc.getPitchWheel());
+    modWheel->setDisplayed (proc.getModWheel());
+    renamePatchBtn.setEnabled (proc.getCurrentPatch() >= 0);
+    deletePatchBtn.setEnabled (proc.getCurrentPatch() >= 0);
     if (learnButton.getToggleState() != proc.isLearnMode()) learnButton.setToggleState (proc.isLearnMode(), dontSendNotification);
     // cheap periodic refresh of displays, strips and zone bar
     progLcd->repaint(); keysLcd->repaint(); synLcd->repaint();

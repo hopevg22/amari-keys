@@ -8,6 +8,7 @@
 #include "Synth.h"
 #include "Drums.h"
 #include "Sampler.h"
+#include "Library.h"
 
 class AmariKeysProcessor : public juce::AudioProcessor, private juce::Timer
 {
@@ -51,17 +52,28 @@ public:
     juce::String getSampleStatus (int layer) const { const juce::ScopedLock l (statusLock); return layers[layer].status; }
     juce::String getSampleName (int layer) const { const juce::ScopedLock l (statusLock); return layers[layer].name; }
     bool hasSamples (int layer) const { return layers[layer].hasSet.load(); }
-    bool isLoadingSamples() const { return loadingLayer.load() >= 0; }
+    bool isLoadingSamples() const { return loadingLayer.load() >= 0 || queuedLoads.load() > 0; }
+    void clearSamples (int layer); // unload a layer's sample set
 
     // ---- programs (message thread)
-    void storeProgram (int index);
-    void recallProgram (int index);
-    void selectProgramSlot (int index) { currentProgram.store (index); }
-    int getCurrentProgramIndex() const { return currentProgram.load(); }
-    static juce::String getProgramLabel (int index) { return juce::String (index / 4 + 1) + juce::String::charToString ((juce::juce_wchar) ('A' + index % 4)); }
-    juce::String getProgramNameAt (int index) const { return programs[(size_t) index].name; }
-    void setProgramNameAt (int index, const juce::String& n) { programs[(size_t) index].name = n; }
-    bool programHasData (int index) const { return ! programs[(size_t) index].values.empty(); }
+    // ---- patches: unlimited, named, stored in the library (Library\Patches.xml) ----
+    // A patch keeps every setting of every layer plus each layer's sound (SFZ / sample folder).
+    int getPatchCount() const { return patches.getNumChildren(); }
+    juce::String getPatchName (int i) const { return patches.getChild (i).getProperty ("name").toString(); }
+    int getCurrentPatch() const { return currentPatch.load(); }
+    void recallPatch (int index);                    // message thread
+    bool storePatch (int index);                     // overwrite with the current sound
+    int savePatchAs (const juce::String& name);      // new patch at the end, returns its index
+    void renamePatch (int index, const juce::String& name);
+    void deletePatch (int index);
+    void reloadPatches();                            // re-read the library (another instance may have changed it)
+    juce::String getSamplePath (int layer) const { const juce::ScopedLock l (statusLock); return layers[layer].path; }
+
+    // ---- wheels (UI and MIDI) ----
+    void setPitchWheel (float v) { wheelBend.store (juce::jlimit (-1.0f, 1.0f, v)); }  // -1..1
+    void setModWheel (float v)   { wheelMod.store (juce::jlimit (0.0f, 1.0f, v)); }    // 0..1
+    float getPitchWheel() const { return wheelBend.load(); }
+    float getModWheel() const { return wheelMod.load(); }
 
     // ---- pads
     void padPressed (int pad, float vel); // message thread (UI)
@@ -81,7 +93,7 @@ private:
     {
         KeysEngine keys; SamplerEngine sampler; SynthEngine synth;
         std::unique_ptr<SampleSet> live, pending, retired;
-        std::atomic<bool> hasSet { false };
+        std::atomic<bool> hasSet { false }, clearRequest { false };
         juce::String status { "No samples loaded" }, name, path;
         juce::AudioBuffer<float> buf;
         juce::SmoothedValue<float> gain;
@@ -105,13 +117,18 @@ private:
     Routed routed[16][128];
     bool sustain = false;
 
-    std::array<Program, numPrograms> programs;
-    std::atomic<int> currentProgram { 0 };
+    juce::ValueTree patches { "PATCHES" };          // message thread only
+    std::atomic<int> currentPatch { -1 };
     std::atomic<int> programRequest { -1 };
+    void migrateOldPrograms (const juce::ValueTree& progs);
+    std::atomic<float> wheelBend { 0.0f }, wheelMod { 0.0f };
+    double vibPhase = 0.0;
 
     juce::SpinLock swapLock;
     juce::ThreadPool loaderPool { 1 };
-    std::atomic<int> loadingLayer { -1 };
+    std::atomic<int> loadingLayer { -1 }, queuedLoads { 0 };
+    juce::uint32 loadSerial[numLayers] {};          // newest request per layer wins
+    void runLoad (int layer, juce::File source, juce::uint32 serial);
     juce::CriticalSection statusLock;
     std::shared_ptr<std::atomic<bool>> alive = std::make_shared<std::atomic<bool>> (true);
 

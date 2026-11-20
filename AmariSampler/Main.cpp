@@ -183,10 +183,10 @@ public:
         panelArea = r.removeFromTop (330);
         auto p = panelArea.reduced (12);
         auto row = [&p] (int h) { auto x = p.removeFromTop (h); p.removeFromTop (6); return x; };
-        auto labelled = [] (Rectangle<int> a, Label& l, Component& c) { l.setBounds (a.removeFromTop (18)); c.setBounds (a.removeFromTop (26)); };
+        auto labelled = [] (juce::Rectangle<int> a, Label& l, Component& c) { l.setBounds (a.removeFromTop (18)); c.setBounds (a.removeFromTop (26)); };
         auto r1 = row (44); labelled (r1, nameL, nameE);
         auto r2 = row (44); browseBtn.setBounds (r2.removeFromRight (90).withTrimmedTop (18)); r2.removeFromRight (6); labelled (r2, dirL, dirE);
-        auto cols = [] (Rectangle<int> a, int n) { Array<Rectangle<int>> out; const int w = (a.getWidth() - (n - 1) * 10) / n; for (int i = 0; i < n; ++i) { out.add (a.removeFromLeft (w)); a.removeFromLeft (10); } return out; };
+        auto cols = [] (juce::Rectangle<int> a, int n) { Array<juce::Rectangle<int>> out; const int w = (a.getWidth() - (n - 1) * 10) / n; for (int i = 0; i < n; ++i) { out.add (a.removeFromLeft (w)); a.removeFromLeft (10); } return out; };
         auto r3 = cols (row (44), 4); labelled (r3[0], loL, loE); labelled (r3[1], hiL, hiE); labelled (r3[2], stepL, stepC); labelled (r3[3], velL, velE);
         auto r4 = cols (row (44), 4); labelled (r4[0], holdL, holdE); labelled (r4[1], tailL, tailE); labelled (r4[2], silL, silE); labelled (r4[3], rateL, rateC);
         auto r5 = cols (row (44), 2); labelled (r5[0], bitsL, bitsC); labelled (r5[1], speedL, speedC);
@@ -473,7 +473,7 @@ private:
     double progress = 0.0;
     bool wasRunning = false;
     CriticalSection logLock; StringArray pendingLog;
-    Rectangle<int> panelArea;
+    juce::Rectangle<int> panelArea;
 
     Label title, sub, pluginLabel, summary;
     TextButton loadBtn { "LOAD VST" }, showBtn { "OPEN PLUGIN" }, browseBtn { "BROWSE" }, startBtn { "START" }, stopBtn { "STOP" };

@@ -67,14 +67,14 @@ endif()
 juce_add_gui_app(AmariSampler
     PRODUCT_NAME "Amari Sampler"
     COMPANY_NAME "Amari Labs"
-    VERSION 0.2.0)
+    VERSION 0.3.0)
 target_sources(AmariSampler PRIVATE AmariSampler/Main.cpp)
 target_compile_definitions(AmariSampler PRIVATE
     JUCE_PLUGINHOST_VST3=1
     JUCE_WEB_BROWSER=0
     JUCE_USE_CURL=0
     JUCE_APPLICATION_NAME_STRING="Amari Sampler"
-    JUCE_APPLICATION_VERSION_STRING="0.2.0")
+    JUCE_APPLICATION_VERSION_STRING="0.3.0")
 target_link_libraries(AmariSampler
     PRIVATE
         juce::juce_audio_utils

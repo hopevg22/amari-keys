@@ -74,6 +74,60 @@ private:
 };
 
 // ----------------------------------------------------------------------------
+// Plays the loaded instrument live through the sound card and measures the output peak.
+struct MonitorCallback : AudioIODeviceCallback
+{
+    AudioProcessorPlayer player;
+    std::atomic<float> peak { 0.0f };
+    std::atomic<bool> muted { false };
+
+    void audioDeviceIOCallbackWithContext (const float* const* in, int numIn, float* const* out, int numOut, int n, const AudioIODeviceCallbackContext& ctx) override
+    {
+        player.audioDeviceIOCallbackWithContext (in, numIn, out, numOut, n, ctx);
+        float pk = 0;
+        for (int c = 0; c < numOut; ++c)
+            if (out[c] != nullptr)
+            {
+                if (muted.load()) FloatVectorOperations::clear (out[c], n);
+                else for (int i = 0; i < n; ++i) pk = jmax (pk, std::abs (out[c][i]));
+            }
+        if (pk > peak.load()) peak = pk;
+    }
+    void audioDeviceAboutToStart (AudioIODevice* d) override { player.audioDeviceAboutToStart (d); }
+    void audioDeviceStopped() override { player.audioDeviceStopped(); }
+};
+
+// Peak meter with hold - tells you whether the loud notes are near clipping
+struct PeakMeter : Component
+{
+    float level = 0.0f, hold = 0.0f; int holdTicks = 0;
+    void push (float pk)
+    {
+        level = jmax (pk, level * 0.85f);
+        if (pk >= hold) { hold = pk; holdTicks = 30; } else if (--holdTicks <= 0) hold *= 0.9f;
+        repaint();
+    }
+    void paint (Graphics& g) override
+    {
+        auto r = getLocalBounds().toFloat();
+        auto bar = r.removeFromLeft (r.getWidth() - 86.0f).reduced (0, 6);
+        g.setColour (Col::panel); g.fillRoundedRectangle (bar, 3.0f);
+        auto toX = [&bar] (float gain) { const float db = jlimit (-60.0f, 0.0f, Decibels::gainToDecibels (gain, -60.0f)); return bar.getX() + bar.getWidth() * (db + 60.0f) / 60.0f; };
+        const float x = toX (level);
+        g.setColour (level >= 0.999f ? Colours::red : (level > 0.7f ? Col::led : Col::led.withAlpha (0.6f)));
+        g.fillRoundedRectangle (bar.withRight (x), 3.0f);
+        g.setColour (Col::text.withAlpha (0.35f));
+        const float target = toX (Decibels::decibelsToGain (-3.0f));
+        g.drawVerticalLine ((int) target, bar.getY(), bar.getBottom());
+        g.setColour (hold >= 0.999f ? Colours::red : Col::text);
+        g.drawLine (toX (hold), bar.getY(), toX (hold), bar.getBottom(), 2.0f);
+        g.setFont (FontOptions (13.0f));
+        const String txt = hold < 0.001f ? String ("peak  -inf") : "peak " + String (Decibels::gainToDecibels (hold), 1) + " dB" + (hold >= 0.999f ? " CLIP" : "");
+        g.drawText (txt, r.withTrimmedLeft (6), Justification::centredLeft);
+    }
+};
+
+// ----------------------------------------------------------------------------
 class MainComponent : public Component, private Thread, private Timer
 {
 public:
@@ -143,7 +197,37 @@ public:
         logBox.setFont (FontOptions (Font::getDefaultMonospacedFontName(), 13.0f, Font::plain));
         addAndMakeVisible (logBox);
 
-        setSize (760, 760);
+        // live monitoring: plugin -> sound card, MIDI keyboards -> plugin
+        const auto audioXml = props->getXmlValue ("audio");
+        const auto audioErr = deviceManager.initialise (0, 2, audioXml.get(), true);
+        if (audioErr.isNotEmpty()) log ("Sound card: " + audioErr);
+        for (auto& d : MidiInput::getAvailableDevices()) deviceManager.setMidiInputDeviceEnabled (d.identifier, true);
+        deviceManager.addMidiInputDeviceCallback ({}, &monitor.player);
+        deviceManager.addAudioCallback (&monitor);
+        keyboardState.addListener (&monitor.player.getMidiMessageCollector());
+
+        keyboard.setAvailableRange (21, 108);
+        keyboard.setOctaveForMiddleC (4); // C4 = middle C, same as Amari Keys and the sample names
+        keyboard.setVelocity (1.0f, false);
+        keyboard.setColour (MidiKeyboardComponent::keyDownOverlayColourId, Col::led);
+        keyboard.setColour (MidiKeyboardComponent::mouseOverKeyOverlayColourId, Col::led.withAlpha (0.3f));
+        keyboard.setColour (MidiKeyboardComponent::shadowColourId, Colours::transparentBlack);
+        keyboard.setColour (MidiKeyboardComponent::upDownButtonBackgroundColourId, Col::panel);
+        keyboard.setColour (MidiKeyboardComponent::upDownButtonArrowColourId, Col::led);
+        addAndMakeVisible (keyboard);
+        addAndMakeVisible (meter);
+        addAndMakeVisible (audioBtn); audioBtn.onClick = [this] { showAudioSettings(); };
+        velLabel.setText ("test velocity", dontSendNotification); addAndMakeVisible (velLabel);
+        testVel.setRange (1, 127, 1); testVel.setValue (127, dontSendNotification);
+        testVel.setSliderStyle (Slider::LinearHorizontal); testVel.setTextBoxStyle (Slider::TextBoxRight, false, 36, 20);
+        testVel.setColour (Slider::thumbColourId, Col::led); testVel.setColour (Slider::trackColourId, Col::led.withAlpha (0.5f));
+        testVel.setColour (Slider::backgroundColourId, Col::panel); testVel.setColour (Slider::textBoxTextColourId, Col::text);
+        testVel.setColour (Slider::textBoxOutlineColourId, Col::edge);
+        testVel.onValueChange = [this] { keyboard.setVelocity ((float) testVel.getValue() / 127.0f, false); };
+        keyboard.setVelocity (1.0f, false);
+        addAndMakeVisible (testVel);
+
+        setSize (760, 900);
         updateSummary(); updateButtons();
         log ("1) LOAD VST and choose your instrument   2) OPEN PLUGIN to pick the sound and switch its effects off   3) START");
 
@@ -155,6 +239,11 @@ public:
     ~MainComponent() override
     {
         stopFlag = true; stopThread (10000);
+        keyboardState.removeListener (&monitor.player.getMidiMessageCollector());
+        deviceManager.removeAudioCallback (&monitor);
+        deviceManager.removeMidiInputDeviceCallback ({}, &monitor.player);
+        monitor.player.setProcessor (nullptr);
+        if (auto xml = deviceManager.createStateXml()) props->setValue ("audio", xml.get());
         pluginWindow.reset();
         plugin.reset();
         setLookAndFeel (nullptr);
@@ -178,6 +267,15 @@ public:
         loadBtn.setBounds (pr.removeFromLeft (130)); pr.removeFromLeft (8);
         showBtn.setBounds (pr.removeFromRight (150)); pr.removeFromRight (8);
         pluginLabel.setBounds (pr);
+        r.removeFromTop (10);
+        keyboard.setBounds (r.removeFromTop (70));
+        keyboard.setKeyWidth ((float) keyboard.getWidth() / 52.0f); // all 88 keys visible
+        r.removeFromTop (6);
+        auto mr = r.removeFromTop (28);
+        audioBtn.setBounds (mr.removeFromRight (130)); mr.removeFromRight (10);
+        auto vr = mr.removeFromRight (230); velLabel.setBounds (vr.removeFromLeft (90)); testVel.setBounds (vr);
+        mr.removeFromRight (10);
+        meter.setBounds (mr);
         r.removeFromTop (12);
 
         panelArea = r.removeFromTop (330);
@@ -313,6 +411,7 @@ private:
     void loadPlugin (const String& path)
     {
         pluginWindow.reset();
+        monitor.player.setProcessor (nullptr);
         plugin.reset();
         const File file (path);
         String err, label;
@@ -338,7 +437,7 @@ private:
             plugin = std::move (inst);
         }
 
-        plugin->prepareToPlay (sampleRate(), 512); // let it initialise and start loading its default sound
+        attachMonitor(); // plays live through the sound card; also lets it start loading its sound
         props->setValue ("plugin", path);
         pluginLabel.setText (label, dontSendNotification);
         log ("Loaded " + plugin->getName() + ". Open it, choose the sound, and switch off its reverb/delay.");
@@ -356,6 +455,27 @@ private:
         }
         else log ("This plugin has no editor window.");
         updateButtons();
+    }
+
+    void attachMonitor()
+    {
+        if (! plugin) return;
+        if (deviceManager.getCurrentAudioDevice() != nullptr) monitor.player.setProcessor (plugin.get());
+        else { plugin->prepareToPlay (sampleRate(), 512); log ("No sound card output - you can still record, but won't hear the plugin. Click AUDIO SETTINGS."); }
+    }
+
+    void showAudioSettings()
+    {
+        auto* sel = new AudioDeviceSelectorComponent (deviceManager, 0, 0, 2, 2, true, false, true, false);
+        sel->setSize (520, 420);
+        DialogWindow::LaunchOptions o;
+        o.content.setOwned (sel);
+        o.dialogTitle = "Audio settings";
+        o.dialogBackgroundColour = Col::bg;
+        o.useNativeTitleBar = true;
+        o.resizable = false;
+        o.componentToCentreAround = this;
+        o.launchAsync();
     }
 
     // ---- settings ------------------------------------------------------------
@@ -408,7 +528,7 @@ private:
         showBtn.setButtonText (pluginWindow ? "CLOSE PLUGIN" : "OPEN PLUGIN");
         startBtn.setEnabled (plugin != nullptr && ! busy);
         stopBtn.setEnabled (busy);
-        for (Component* c : std::initializer_list<Component*> { &nameE, &dirE, &loE, &hiE, &velE, &holdE, &tailE, &silE, &stepC, &rateC, &bitsC, &speedC, &sfzT, &browseBtn })
+        for (Component* c : std::initializer_list<Component*> { &nameE, &dirE, &loE, &hiE, &velE, &holdE, &tailE, &silE, &stepC, &rateC, &bitsC, &speedC, &sfzT, &browseBtn, &keyboard, &audioBtn })
             c->setEnabled (! busy);
     }
 
@@ -432,6 +552,8 @@ private:
     {
         stopFlag = false; progress = 0.0;
         logBox.clear();
+        keyboardState.allNotesOff (0);
+        monitor.player.setProcessor (nullptr); // the recorder drives the plugin on its own while it runs
         startThread();
         updateButtons();
     }
@@ -443,8 +565,6 @@ private:
         r.onProgress = [this] (double p) { progress = p; };
         r.onLog = [this] (const String& t) { const ScopedLock l (logLock); pendingLog.add (t); };
         r.run (*plugin, settings);
-        // leave the plugin ready to be played/edited again
-        plugin->prepareToPlay (sampleRate(), 512);
     }
 
     void timerCallback() override
@@ -452,8 +572,9 @@ private:
         StringArray lines;
         { const ScopedLock l (logLock); lines.swapWith (pendingLog); }
         for (auto& t : lines) log (t);
-        if (wasRunning && ! isThreadRunning()) updateButtons();
+        if (wasRunning && ! isThreadRunning()) { attachMonitor(); updateButtons(); } // live playing again after recording
         wasRunning = isThreadRunning();
+        meter.push (monitor.peak.exchange (0.0f));
     }
 
     void log (const String& t)
@@ -463,6 +584,14 @@ private:
     }
 
     DarkLook look;
+    AudioDeviceManager deviceManager;
+    MonitorCallback monitor;
+    MidiKeyboardState keyboardState;
+    MidiKeyboardComponent keyboard { keyboardState, MidiKeyboardComponent::horizontalKeyboard };
+    PeakMeter meter;
+    TextButton audioBtn { "AUDIO SETTINGS" };
+    Label velLabel;
+    Slider testVel;
     AudioPluginFormatManager formats;
     std::unique_ptr<AudioProcessor> plugin;
     std::unique_ptr<PluginWindow> pluginWindow;
@@ -491,7 +620,7 @@ class AmariSamplerApp : public JUCEApplication
 {
 public:
     const String getApplicationName() override { return "Amari Sampler"; }
-    const String getApplicationVersion() override { return "0.2"; }
+    const String getApplicationVersion() override { return "0.3"; }
     bool moreThanOneInstanceAllowed() override { return false; }
 
     void initialise (const String&) override { window = std::make_unique<MainWindow>(); }
@@ -505,7 +634,7 @@ public:
             setUsingNativeTitleBar (true);
             setContentOwned (new MainComponent(), true);
             setResizable (true, false);
-            setResizeLimits (700, 640, 1400, 1400);
+            setResizeLimits (700, 820, 1400, 1400);
             centreWithSize (getWidth(), getHeight());
             setVisible (true);
         }

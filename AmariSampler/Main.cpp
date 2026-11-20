@@ -184,6 +184,7 @@ public:
         combo (rateL, "Sample rate", rateC, { "44.1 kHz", "48 kHz", "96 kHz" }, "rate", 1);
         combo (bitsL, "Bit depth", bitsC, { "16-bit", "24-bit" }, "bits", 1);
         combo (speedL, "Speed", speedC, { "Real time (safest for streaming pianos)", "Fast (offline)" }, "speed", 0);
+        combo (pedalL, "Sustain pedal", pedalC, { "Up (normal)", "Down (string resonance)", "Both: up + down sets" }, "pedal", 0);
         sfzT.setButtonText ("Also write an .sfz file (exact mapping)"); sfzT.setToggleState (props->getBoolValue ("sfz", true), dontSendNotification);
         sfzT.onClick = [this] { props->setValue ("sfz", sfzT.getToggleState()); };
         addAndMakeVisible (sfzT);
@@ -217,6 +218,20 @@ public:
         addAndMakeVisible (keyboard);
         addAndMakeVisible (meter);
         addAndMakeVisible (audioBtn); audioBtn.onClick = [this] { showAudioSettings(); };
+        liveBtn.setClickingTogglesState (true);
+        liveBtn.setToggleState (props->getBoolValue ("live", true), dontSendNotification);
+        liveBtn.setTooltip ("Play the plugin through your speakers. Switch off while you use your DAW, so both don't sound at once.");
+        auto applyLive = [this]
+        {
+            const bool on = liveBtn.getToggleState();
+            monitor.muted = ! on;
+            liveBtn.setButtonText (on ? "LIVE: ON" : "LIVE: OFF");
+            if (! on) keyboardState.allNotesOff (0);
+            props->setValue ("live", on);
+        };
+        liveBtn.onClick = applyLive;
+        applyLive();
+        addAndMakeVisible (liveBtn);
         velLabel.setText ("test velocity", dontSendNotification); addAndMakeVisible (velLabel);
         testVel.setRange (1, 127, 1); testVel.setValue (127, dontSendNotification);
         testVel.setSliderStyle (Slider::LinearHorizontal); testVel.setTextBoxStyle (Slider::TextBoxRight, false, 36, 20);
@@ -272,8 +287,9 @@ public:
         keyboard.setKeyWidth ((float) keyboard.getWidth() / 52.0f); // all 88 keys visible
         r.removeFromTop (6);
         auto mr = r.removeFromTop (28);
-        audioBtn.setBounds (mr.removeFromRight (130)); mr.removeFromRight (10);
-        auto vr = mr.removeFromRight (230); velLabel.setBounds (vr.removeFromLeft (90)); testVel.setBounds (vr);
+        audioBtn.setBounds (mr.removeFromRight (130)); mr.removeFromRight (6);
+        liveBtn.setBounds (mr.removeFromRight (90)); mr.removeFromRight (10);
+        auto vr = mr.removeFromRight (210); velLabel.setBounds (vr.removeFromLeft (90)); testVel.setBounds (vr);
         mr.removeFromRight (10);
         meter.setBounds (mr);
         r.removeFromTop (12);
@@ -287,7 +303,7 @@ public:
         auto cols = [] (juce::Rectangle<int> a, int n) { Array<juce::Rectangle<int>> out; const int w = (a.getWidth() - (n - 1) * 10) / n; for (int i = 0; i < n; ++i) { out.add (a.removeFromLeft (w)); a.removeFromLeft (10); } return out; };
         auto r3 = cols (row (44), 4); labelled (r3[0], loL, loE); labelled (r3[1], hiL, hiE); labelled (r3[2], stepL, stepC); labelled (r3[3], velL, velE);
         auto r4 = cols (row (44), 4); labelled (r4[0], holdL, holdE); labelled (r4[1], tailL, tailE); labelled (r4[2], silL, silE); labelled (r4[3], rateL, rateC);
-        auto r5 = cols (row (44), 2); labelled (r5[0], bitsL, bitsC); labelled (r5[1], speedL, speedC);
+        auto r5 = cols (row (44), 3); labelled (r5[0], bitsL, bitsC); labelled (r5[1], speedL, speedC); labelled (r5[2], pedalL, pedalC);
         sfzT.setBounds (row (26));
         summary.setBounds (p);
 
@@ -498,6 +514,7 @@ private:
         s.bitDepth = bitsC.getSelectedItemIndex() == 0 ? 16 : 24;
         s.realtimePace = speedC.getSelectedItemIndex() == 0;
         s.writeSfz = sfzT.getToggleState();
+        s.pedalMode = jlimit (0, 2, pedalC.getSelectedItemIndex());
         if (s.name.isEmpty()) problem = "Enter a sample name.";
         else if (dirE.getText().trim().isEmpty() || ! File::isAbsolutePath (dirE.getText().trim())) problem = "Choose a folder to save to.";
         else if (s.lowNote < 0 || s.highNote < 0) problem = "Notes must look like A0, C#4 or C8.";
@@ -510,11 +527,11 @@ private:
     {
         MultiSampleRenderer::Settings s; String problem;
         if (! readSettings (s, problem)) { summary.setText (problem, dontSendNotification); return; }
-        const int n = s.notes().size() * s.velocities.size();
+        const int n = s.notes().size() * s.velocities.size() * (s.pedalMode == 2 ? 2 : 1);
         const double perNote = s.holdSeconds + 0.5 * s.maxTailSeconds + 0.5;
         const double secs = n * perNote;
         const double mb = n * (s.holdSeconds + 0.4 * s.maxTailSeconds) * s.sampleRate * 2 * (s.bitDepth / 8) / 1048576.0;
-        summary.setText (String (s.notes().size()) + " notes x " + String (s.velocities.size()) + " velocities = " + String (n) + " samples"
+        summary.setText (String (s.notes().size()) + " notes x " + String (s.velocities.size()) + " velocities" + (s.pedalMode == 2 ? " x 2 pedal sets" : "") + " = " + String (n) + " samples"
                          + "   |   about " + String (roundToInt (mb)) + " MB on disk"
                          + (s.realtimePace ? "   |   about " + String (roundToInt (secs / 60.0)) + " min" : String()),
                          dontSendNotification);
@@ -528,7 +545,7 @@ private:
         showBtn.setButtonText (pluginWindow ? "CLOSE PLUGIN" : "OPEN PLUGIN");
         startBtn.setEnabled (plugin != nullptr && ! busy);
         stopBtn.setEnabled (busy);
-        for (Component* c : std::initializer_list<Component*> { &nameE, &dirE, &loE, &hiE, &velE, &holdE, &tailE, &silE, &stepC, &rateC, &bitsC, &speedC, &sfzT, &browseBtn, &keyboard, &audioBtn })
+        for (Component* c : std::initializer_list<Component*> { &nameE, &dirE, &loE, &hiE, &velE, &holdE, &tailE, &silE, &stepC, &rateC, &bitsC, &speedC, &pedalC, &sfzT, &browseBtn, &keyboard, &audioBtn })
             c->setEnabled (! busy);
     }
 
@@ -589,7 +606,7 @@ private:
     MidiKeyboardState keyboardState;
     MidiKeyboardComponent keyboard { keyboardState, MidiKeyboardComponent::horizontalKeyboard };
     PeakMeter meter;
-    TextButton audioBtn { "AUDIO SETTINGS" };
+    TextButton audioBtn { "AUDIO SETTINGS" }, liveBtn { "LIVE: ON" };
     Label velLabel;
     Slider testVel;
     AudioPluginFormatManager formats;
@@ -606,9 +623,9 @@ private:
 
     Label title, sub, pluginLabel, summary;
     TextButton loadBtn { "LOAD VST" }, showBtn { "OPEN PLUGIN" }, browseBtn { "BROWSE" }, startBtn { "START" }, stopBtn { "STOP" };
-    Label nameL, dirL, loL, hiL, velL, holdL, tailL, silL, stepL, rateL, bitsL, speedL;
+    Label nameL, dirL, loL, hiL, velL, holdL, tailL, silL, stepL, rateL, bitsL, speedL, pedalL;
     TextEditor nameE, dirE, loE, hiE, velE, holdE, tailE, silE, logBox;
-    ComboBox stepC, rateC, bitsC, speedC;
+    ComboBox stepC, rateC, bitsC, speedC, pedalC;
     ToggleButton sfzT;
     ProgressBar progressBar { progress };
 
@@ -620,7 +637,7 @@ class AmariSamplerApp : public JUCEApplication
 {
 public:
     const String getApplicationName() override { return "Amari Sampler"; }
-    const String getApplicationVersion() override { return "0.3"; }
+    const String getApplicationVersion() override { return "0.4"; }
     bool moreThanOneInstanceAllowed() override { return false; }
 
     void initialise (const String&) override { window = std::make_unique<MainWindow>(); }

@@ -79,6 +79,41 @@ int main()
             }
         if (set->zones.size() != 30 * 3) { std::cout << "  zone count " << set->zones.size() << "\n"; ++fails; }
     }
+    // smooth dynamics: playing loudness must rise steadily with velocity (no jumps at layer boundaries, no double curve)
+    {
+        String m; auto set = SampleLoader::load (s.outDir.getChildFile ("Test_Piano.sfz"), m, [] (float) {});
+        for (int key : { 33, 60, 90 })
+        {
+            float prev = 0.0f; String line;
+            for (int v = 5; v <= 127; v += 2)
+            {
+                auto h = set->play (key, v, false, 0.6f);
+                const float lv = h.gain * h.zone->norm * h.zone->loud / h.zone->norm * 1.0f; // gain x recorded loudness
+                if (lv + 1e-6f < prev * 0.97f) { if (fails < 8) std::cout << "  level drops at key " << key << " vel " << v << "\n"; ++fails; }
+                if (v > 40 && lv > prev * 1.6f && prev > 0) { std::cout << "  level jump at key " << key << " vel " << v << "\n"; ++fails; }
+                prev = lv;
+                if (v % 30 == 1 || v == 127) line << " v" << v << "=" << String (Decibels::gainToDecibels (lv), 1) << "dB";
+            }
+            std::cout << "  key " << key << ":" << line << "\n";
+        }
+    }
+    // sustain pedal: record both sets, check the SFZ has both and the pedal picks the _sus samples
+    {
+        MultiSampleRenderer::Settings p2 = s;
+        p2.name = "SusTest"; p2.outDir = out.getChildFile ("SusTest"); p2.pedalMode = 2; p2.step = 12; p2.velocities = { 64, 127 };
+        MultiSampleRenderer r2; r2.onLog = [] (const String&) {};
+        if (! r2.run (piano, p2)) ++fails;
+        for (auto src : { p2.outDir.getChildFile ("SusTest.sfz"), p2.outDir })
+        {
+            String m; auto set = SampleLoader::load (src, m, [] (float) {});
+            const int expect = 9 * 2 * 2; // A0..A7 every octave + C8, 2 velocities, 2 pedal sets
+            auto* up = set ? set->find (60, 100, false) : nullptr;
+            auto* dn = set ? set->find (60, 100, true) : nullptr;
+            const bool ok = set && set->hasPedalSet && (int) set->zones.size() == expect && up && dn && ! up->pedal && dn->pedal;
+            std::cout << "  pedal sets via " << src.getFileName() << ": " << m << (ok ? "  OK" : "  WRONG") << "\n";
+            if (! ok) ++fails;
+        }
+    }
     std::cout << (fails ? "FAILED " + String (fails) : String ("ROUND TRIP OK")) << std::endl;
     return fails ? 1 : 0;
 }

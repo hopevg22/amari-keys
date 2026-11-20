@@ -132,7 +132,7 @@ inline APVTS::ParameterLayout createLayout()
 
     // ---- effects
     ch ("fx_target", "FX Target", fxTargets(), 0);
-    bo ("mod_on", "Mod On", true);
+    bo ("mod_on", "Mod On", false);
     ch ("mod_type", "Mod Type", modTypes(), 0);
     fl ("mod_rate", "Mod Rate", 0.05f, 5.0f, 0.6f, 1.0f);
     fl ("mod_depth", "Mod Depth", 0.0f, 1.0f, 0.4f);

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(AmariKeys VERSION 0.3.0)
+project(AmariKeys VERSION 0.4.0)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -67,14 +67,14 @@ endif()
 juce_add_gui_app(AmariSampler
     PRODUCT_NAME "Amari Sampler"
     COMPANY_NAME "Amari Labs"
-    VERSION 0.3.0)
+    VERSION 0.4.0)
 target_sources(AmariSampler PRIVATE AmariSampler/Main.cpp)
 target_compile_definitions(AmariSampler PRIVATE
     JUCE_PLUGINHOST_VST3=1
     JUCE_WEB_BROWSER=0
     JUCE_USE_CURL=0
     JUCE_APPLICATION_NAME_STRING="Amari Sampler"
-    JUCE_APPLICATION_VERSION_STRING="0.3.0")
+    JUCE_APPLICATION_VERSION_STRING="0.4.0")
 target_link_libraries(AmariSampler
     PRIVATE
         juce::juce_audio_utils

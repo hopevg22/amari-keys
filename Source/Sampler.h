@@ -15,7 +15,12 @@ struct SampleZone
     double sourceRate = 48000.0;
     int root = 60, lokey = 0, hikey = 127, lovel = 1, hivel = 127;
     float tuneCents = 0.0f, gain = 1.0f;
+    float norm = 1.0f;     // data is stored peak-normalised (full 16-bit resolution); multiply by this to get the recorded level
+    float loud = 0.0f;     // RMS of the first 300 ms at the recorded level - used to blend velocities between layers
+    bool pedal = false;    // recorded with the sustain pedal down (used while the pedal is held)
 };
+
+struct ZoneHit { const SampleZone* zone = nullptr; float gain = 1.0f; };
 
 struct SampleSet
 {
@@ -25,17 +30,58 @@ struct SampleSet
     juce::String mappingInfo, mappingReport;
     size_t bytes = 0;
 
-    const SampleZone* find (int note, int vel) const
+    bool hasPedalSet = false;
+
+    const SampleZone* find (int note, int vel, bool pedalDown = false) const
     {
+        const bool wantPedal = pedalDown && hasPedalSet;
         const SampleZone* best = nullptr; int bestDist = 1 << 30;
         for (auto& z : zones)
         {
+            if (z->pedal != wantPedal) continue;
             if (note < z->lokey || note > z->hikey) continue;
             if (vel >= z->lovel && vel <= z->hivel) return z.get();
             const int d = vel < z->lovel ? z->lovel - vel : vel - z->hivel; // nearest layer if gaps
             if (d < bestDist) { bestDist = d; best = z.get(); }
         }
+        if (best == nullptr && wantPedal) return find (note, vel, false); // no pedal sample for this key - use the normal one
+        if (best == nullptr && ! pedalDown && hasPedalSet)                 // pedal-only set: use it with the pedal up too
+            for (auto& z : zones) if (z->pedal && note >= z->lokey && note <= z->hikey && vel >= z->lovel && vel <= z->hivel) return z.get();
         return best;
+    }
+
+    // The zone to play plus a gain that moves smoothly between the recorded velocity layers,
+    // so the recorded dynamics are used as they are (no second velocity curve on top).
+    ZoneHit play (int note, int vel, bool pedalDown, float singleLayerDynamics) const
+    {
+        ZoneHit h;
+        h.zone = find (note, vel, pedalDown);
+        if (h.zone == nullptr) return h;
+        const auto* z = h.zone;
+        if (numLayers <= 1 || z->loud <= 0.0f)
+        {
+            h.gain = (1.0f - singleLayerDynamics) + singleLayerDynamics * (float) vel / 127.0f;
+            return h;
+        }
+        // the next softer layer for the same key
+        const SampleZone* lower = nullptr;
+        for (auto& o : zones)
+            if (o.get() != z && o->pedal == z->pedal && note >= o->lokey && note <= o->hikey && o->hivel < z->lovel && o->loud > 0.0f)
+                if (lower == nullptr || o->hivel > lower->hivel) lower = o.get();
+        const float v = (float) juce::jlimit (1, 127, vel);
+        const float vHi = (float) juce::jmax (1, z->hivel);
+        float db = 0.0f;
+        if (v >= vHi) db = 0.0f;
+        else if (lower != nullptr)
+        {
+            const float vLo = (float) lower->hivel;
+            const float t = juce::jlimit (0.0f, 1.0f, (v - vLo) / juce::jmax (1.0f, vHi - vLo));
+            const float dbLo = juce::Decibels::gainToDecibels (lower->loud), dbHi = juce::Decibels::gainToDecibels (z->loud);
+            db = (1.0f - t) * (dbLo - dbHi);                     // 0 at this layer's velocity, softer towards the layer below
+        }
+        else db = 40.0f * std::log10 (v / vHi);                  // below the softest layer: amplitude ~ velocity squared
+        h.gain = juce::Decibels::decibelsToGain (juce::jmax (-40.0f, db));
+        return h;
     }
 };
 
@@ -115,10 +161,25 @@ struct SampleLoader
         z->length = (int) juce::jmin ((juce::int64) (r->sampleRate * maxSeconds), r->lengthInSamples);
         juce::AudioBuffer<float> tmp (z->channels, z->length);
         r->read (&tmp, 0, z->length, 0, true, z->channels > 1);
+        // keep full 16-bit resolution even for very soft layers: store peak-normalised, remember the level
+        const float rawPeak = tmp.getMagnitude (0, z->length);
+        const float peak = rawPeak < 3.0e-5f ? 1.0f : rawPeak; // (near-)silent file: don't blow up its noise
+        z->norm = peak;
+        {
+            const int n300 = juce::jmin (z->length, (int) (r->sampleRate * 0.3));
+            double acc = 0.0;
+            for (int c = 0; c < z->channels; ++c) { const float* d = tmp.getReadPointer (c); for (int i = 0; i < n300; ++i) acc += (double) d[i] * d[i]; }
+            z->loud = n300 > 0 ? (float) std::sqrt (acc / (double) (n300 * z->channels)) : 0.0f;
+        }
+        const float k = 32767.0f / peak;
+        juce::Random dither (12345);
         z->data.resize ((size_t) z->length * (size_t) z->channels);
         for (int i = 0; i < z->length; ++i)
             for (int c = 0; c < z->channels; ++c)
-                z->data[(size_t) i * (size_t) z->channels + (size_t) c] = (int16_t) juce::jlimit (-32767.0f, 32767.0f, tmp.getSample (c, i) * 32767.0f);
+            {
+                const float tpdf = dither.nextFloat() - dither.nextFloat(); // TPDF dither: smooth quiet tails instead of grainy steps
+                z->data[(size_t) i * (size_t) z->channels + (size_t) c] = (int16_t) juce::jlimit (-32767.0f, 32767.0f, std::round (tmp.getSample (c, i) * k + tpdf));
+            }
         bytes += z->data.size() * sizeof (int16_t);
         return z;
     }
@@ -199,11 +260,17 @@ struct SampleLoader
         return (float) (69.0 + 12.0 * std::log2 (f / 440.0));
     }
 
+    static bool isPedalDownName (const juce::String& stem)
+    {
+        juce::StringArray t; t.addTokens (stem.toLowerCase(), "_- .()[]", ""); t.removeEmptyStrings();
+        return t.contains ("sus") || t.contains ("pdown") || t.contains ("pedaldown") || t.contains ("ped");
+    }
+
     static float wrap12 (float v) { v = std::fmod (v, 12.0f); if (v > 6.0f) v -= 12.0f; if (v < -6.0f) v += 12.0f; return v; }
 
     static void loadFolder (juce::AudioFormatManager& fm, const juce::File& dir, SampleSet& set, juce::String& message, std::function<void (float)> progress)
     {
-        struct Item { juce::File f; int named = -1, layer = -1, note = -1; float heard = -1.0f; std::unique_ptr<SampleZone> z; };
+        struct Item { juce::File f; int named = -1, layer = -1, note = -1; float heard = -1.0f; bool pedal = false; std::unique_ptr<SampleZone> z; };
         std::vector<juce::File> files; int skipped = 0;
         for (const auto& e : juce::RangedDirectoryIterator (dir, true, "*", juce::File::findFiles))
         {
@@ -223,6 +290,7 @@ struct SampleLoader
         {
             Item it; it.f = f;
             parseFileName (f.getFileNameWithoutExtension(), it.named, it.layer);
+            it.pedal = isPedalDownName (f.getFileNameWithoutExtension());
             it.z = readZone (fm, f, set.bytes);
             progress (0.95f * (float) ++done / (float) files.size());
             if (! it.z) { ++skipped; continue; }
@@ -272,21 +340,28 @@ struct SampleLoader
             it.note = juce::jlimit (0, 127, it.note);
         }
 
-        // 3) velocity layers (soft -> loud) and key ranges between neighbouring roots
-        std::vector<int> layers;
-        for (auto& it : items) if (std::find (layers.begin(), layers.end(), it.layer) == layers.end()) layers.push_back (it.layer);
-        std::sort (layers.begin(), layers.end());
-        const int L = (int) layers.size();
-        set.numLayers = L;
-
+        // 3) velocity layers (soft -> loud) and key ranges between neighbouring roots,
+        //    separately for normal samples and sustain-pedal-down samples ("_sus")
         juce::String report;
         report << "Amari Keys sample mapping - " << dir.getFullPathName() << "\n"
                << "Mapped by: " << how << "\n\n"
                << "file  ->  plays as  |  name says  |  audio sounds like\n";
-        for (int li = 0; li < L; ++li)
+        int L = 0;
+        set.numLayers = 1;
+        for (int pg = 0; pg < 2; ++pg)
+        {
+        std::vector<int> layers;
+        for (auto& it : items) if (it.pedal == (pg == 1) && std::find (layers.begin(), layers.end(), it.layer) == layers.end()) layers.push_back (it.layer);
+        std::sort (layers.begin(), layers.end());
+        const int LG = (int) layers.size();
+        if (LG == 0) continue;
+        if (pg == 1) { set.hasPedalSet = true; report << "\n===== sustain pedal down samples =====\n"; }
+        L = juce::jmax (L, LG);
+        set.numLayers = juce::jmax (set.numLayers, LG);
+        for (int li = 0; li < LG; ++li)
         {
             std::vector<Item*> layerItems;
-            for (auto& it : items) if (it.layer == layers[(size_t) li]) layerItems.push_back (&it);
+            for (auto& it : items) if (it.pedal == (pg == 1) && it.layer == layers[(size_t) li]) layerItems.push_back (&it);
             std::stable_sort (layerItems.begin(), layerItems.end(), [] (Item* a, Item* b) { return a->note < b->note; });
             std::vector<Item*> uniq;
             for (auto* it : layerItems)
@@ -294,8 +369,8 @@ struct SampleLoader
                 if (! uniq.empty() && uniq.back()->note == it->note) { set.bytes -= it->z->data.size() * sizeof (int16_t); it->z.reset(); continue; } // round robin - keep first
                 uniq.push_back (it);
             }
-            const int lovel = 1 + (127 * li) / L, hivel = (127 * (li + 1)) / L;
-            report << "\n[velocity layer " << (li + 1) << " of " << L << ", vel " << lovel << "-" << hivel << "]\n";
+            const int lovel = 1 + (127 * li) / LG, hivel = (127 * (li + 1)) / LG;
+            report << "\n[velocity layer " << (li + 1) << " of " << LG << ", vel " << lovel << "-" << hivel << "]\n";
             for (size_t k = 0; k < uniq.size(); ++k)
             {
                 auto* it = uniq[k];
@@ -303,15 +378,17 @@ struct SampleLoader
                 z->root = it->note;
                 z->lokey = k == 0 ? 0 : (uniq[k - 1]->note + it->note) / 2 + 1;
                 z->hikey = k + 1 == uniq.size() ? 127 : (it->note + uniq[k + 1]->note) / 2;
-                z->lovel = lovel; z->hivel = hivel;
+                z->lovel = lovel; z->hivel = hivel; z->pedal = (pg == 1);
                 report << it->f.getFileName() << "  ->  " << juce::MidiMessage::getMidiNoteName (it->note, true, true, 4)
                        << "  |  " << (it->named >= 0 ? juce::MidiMessage::getMidiNoteName (it->named, true, true, 4) : juce::String ("-"))
                        << "  |  " << (it->heard >= 0 ? juce::MidiMessage::getMidiNoteName (juce::roundToInt (it->heard), true, true, 4) : juce::String ("?")) << "\n";
                 set.zones.push_back (std::move (z));
             }
         }
+        }
         progress (1.0f);
         message = juce::String (set.zones.size()) + " samples, " + juce::String (L) + (L == 1 ? " layer" : " layers")
+                + (set.hasPedalSet ? " + pedal-down set" : "")
                 + (skipped > 0 ? " (" + juce::String (skipped) + " skipped)" : juce::String());
 
         auto lo = std::min_element (items.begin(), items.end(), [] (const Item& a, const Item& b) { return a.note < b.note; });
@@ -405,11 +482,13 @@ struct SampleLoader
             if (z->lokey < 0) z->lokey = 0;
             if (z->hikey < 0) z->hikey = 127;
             if (z->root < 0) z->root = 60;
+            if (r.count ("locc64") && r["locc64"].getIntValue() >= 64) { z->pedal = true; set.hasPedalSet = true; } // sustain-pedal-down samples
             vels.insert (z->lovel);
             set.zones.push_back (std::move (z));
         }
         set.numLayers = juce::jmax (1, (int) vels.size());
         message = juce::String (set.zones.size()) + " samples, " + juce::String (set.numLayers) + (set.numLayers == 1 ? " layer" : " layers")
+                + (set.hasPedalSet ? " + pedal-down set" : "")
                 + (skipped > 0 ? " (" + juce::String (skipped) + " skipped)" : juce::String());
         juce::ignoreUnused (cache);
     }
@@ -419,14 +498,17 @@ struct SampleLoader
 struct SamplerEngine
 {
     float dynamics = 0.6f, release = 0.3f; int timbre = 1;
+    static constexpr float outputGain = 2.0f; // with default layer level + master, a sample plays close to its recorded level
 
     void prepare (double sampleRate) { sr = sampleRate; allOff(); }
     void setSet (const SampleSet* s) { set = s; allOff(); }
 
-    void noteOn (int note, float vel)
+    void noteOn (int note, float vel, bool pedalDown = false)
     {
         if (! set) return;
-        const auto* z = set->find (note, juce::jlimit (1, 127, (int) std::round (vel * 127.0f)));
+        const int v127 = juce::jlimit (1, 127, (int) std::round (vel * 127.0f));
+        const auto hit = set->play (note, v127, pedalDown, dynamics);
+        const auto* z = hit.zone;
         if (! z) return;
         for (auto& v : voices) if (v.active && v.note == note && ! v.released) { v.released = true; v.fastRelease = true; } // re-strike
         Voice* v = nullptr;
@@ -435,7 +517,7 @@ struct SamplerEngine
         *v = Voice {};
         v->active = true; v->note = note; v->zone = z;
         v->inc = std::pow (2.0, (note - z->root + z->tuneCents / 100.0) / 12.0) * z->sourceRate / sr;
-        v->gain = ((1.0f - dynamics) + dynamics * vel) * z->gain;
+        v->gain = hit.gain * z->gain * z->norm * outputGain; // plays each sample at its recorded level
     }
     void noteOff (int note) { for (auto& v : voices) if (v.active && v.note == note) v.released = true; }
     void allOff() { for (auto& v : voices) v.active = false; }
@@ -468,7 +550,7 @@ struct SamplerEngine
                 l = herm (0); r = ch > 1 ? herm (1) : l;
                 v.att = juce::jmin (1.0f, v.att + 0.02f);
                 if (v.released) v.env *= v.fastRelease ? fastCoef : relCoef;
-                const float a = v.att * v.env * v.gain * 0.4f;
+                const float a = v.att * v.env * v.gain;
                 outL[i] += l * a; outR[i] += r * a;
                 v.pos += v.inc;
             }

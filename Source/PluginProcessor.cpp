@@ -269,7 +269,7 @@ void AmariKeysProcessor::handleMidi (const juce::MidiMessage& m)
             {
                 case Kind::Organ: organ.noteOn (ln, vel); break;
                 case Kind::Keys:
-                    if ((int) param (lid (l, "model")) == 4 && L.live != nullptr) L.sampler.noteOn (ln, vel);
+                    if ((int) param (lid (l, "model")) == 4 && L.live != nullptr) L.sampler.noteOn (ln, vel, sustain);
                     else
                     {
                         if ((int) param (lid (l, "model")) == 4) L.keys.s.model = 0; // no samples yet -> tine EP fallback
@@ -277,7 +277,7 @@ void AmariKeysProcessor::handleMidi (const juce::MidiMessage& m)
                     }
                     break;
                 case Kind::Synth:
-                    if ((int) param (lid (l, "src")) == 1 && L.live != nullptr) L.sampler.noteOn (ln, vel);
+                    if ((int) param (lid (l, "src")) == 1 && L.live != nullptr) L.sampler.noteOn (ln, vel, sustain);
                     else L.synth.noteOn (ln, vel);
                     break;
             }
@@ -524,7 +524,7 @@ void AmariKeysProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::M
 
     masterSm.setTargetValue (param ("master"));
     auto* oL = buffer.getWritePointer (0); auto* oR = buffer.getWritePointer (1);
-    auto soft = [] (float x) { const float a = std::abs (x); return a <= 0.8f ? x : std::copysign (0.8f + 0.2f * std::tanh ((a - 0.8f) * 5.0f), x); };
+    auto soft = [] (float x) { const float a = std::abs (x); return a <= 0.9f ? x : std::copysign (0.9f + 0.1f * std::tanh ((a - 0.9f) * 10.0f), x); };
     for (int i = 0; i < n; ++i)
     {
         const float g = masterSm.getNextValue();

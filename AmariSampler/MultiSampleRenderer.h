@@ -21,6 +21,7 @@ struct MultiSampleRenderer
         int bitDepth = 24;
         float silenceDb = -70.0f;
         bool realtimePace = true, writeSfz = true;
+        int pedalMode = 0; // 0 = pedal up, 1 = sustain pedal down (string resonance), 2 = both sets
 
         juce::Array<int> notes() const
         {
@@ -108,12 +109,20 @@ struct MultiSampleRenderer
             flush (3.0);
         }
 
-        const int total = notes.size() * vels.size();
+        juce::Array<bool> passes;
+        if (s.pedalMode == 0 || s.pedalMode == 2) passes.add (false);
+        if (s.pedalMode == 1 || s.pedalMode == 2) passes.add (true);
+        const int total = notes.size() * vels.size() * passes.size();
         int done = 0, clipped = 0, silentCount = 0;
-        struct Made { int note, vel; juce::String file; };
+        struct Made { int note, vel; bool pedal; juce::String file; };
         juce::Array<Made> made;
-        log ("Recording " + juce::String (notes.size()) + " notes x " + juce::String (vels.size()) + " velocities = " + juce::String (total) + " samples");
+        log ("Recording " + juce::String (notes.size()) + " notes x " + juce::String (vels.size()) + " velocities"
+             + (passes.size() > 1 ? " x 2 (pedal up + pedal down)" : (passes[0] ? " with the sustain pedal down" : juce::String()))
+             + " = " + juce::String (total) + " samples");
 
+        for (const bool pedal : passes)
+        {
+        if (pedal) log ("--- sustain pedal down set ---");
         for (int vi = 0; vi < vels.size(); ++vi)
         {
             for (int ni = 0; ni < notes.size(); ++ni)
@@ -122,8 +131,14 @@ struct MultiSampleRenderer
                 const int note = notes[ni], vel = juce::jlimit (1, 127, vels[vi]);
 
                 std::vector<float> L, R;
+                auto pedalTo = [&] (int value)
+                {
+                    juce::MidiBuffer m; m.addEvent (juce::MidiMessage::controllerEvent (1, 64, value), 0);
+                    process (m);
+                };
                 auto record = [&] (int attempt)
                 {
+                    if (pedal) { pedalTo (127); flush (0.3); } // pedal down first, let its noise pass
                     L.clear(); R.clear();
                     const int hold = (int) (s.holdSeconds * sr);
                     const int maxLen = hold + (int) (s.maxTailSeconds * sr);
@@ -147,12 +162,14 @@ struct MultiSampleRenderer
                 };
 
                 record (0);
+                if (pedal) pedalTo (0);
                 float peak = 0; for (size_t i = 0; i < L.size(); ++i) peak = juce::jmax (peak, std::abs (L[i]), std::abs (R[i]));
                 if (peak < silence * 4.0f) // nothing came out - the instrument may still be loading
                 {
                     log (noteName (note) + " v" + juce::String (vi + 1) + ": silent, waiting and trying again...");
                     flush (2.0); juce::Thread::sleep (2000);
                     record (1);
+                    if (pedal) pedalTo (0);
                     peak = 0; for (size_t i = 0; i < L.size(); ++i) peak = juce::jmax (peak, std::abs (L[i]), std::abs (R[i]));
                 }
                 flush (3.0);
@@ -178,13 +195,14 @@ struct MultiSampleRenderer
                     if (outCh > 1) out.setSample (1, i, R[start + (size_t) i] * g);
                 }
 
-                const auto fileName = name + "_" + noteName (note) + "_v" + juce::String (vi + 1) + ".wav";
+                const auto fileName = name + "_" + noteName (note) + "_v" + juce::String (vi + 1) + (pedal ? "_sus" : "") + ".wav";
                 auto f = dir.getChildFile (fileName);
                 if (! writeWav (f, out, sr, s.bitDepth)) { log ("Could not write " + fileName); continue; }
-                made.add ({ note, vi, fileName });
+                made.add ({ note, vi, pedal, fileName });
                 log (fileName + "  " + juce::String (len / sr, 1) + " s, peak " + juce::String (juce::Decibels::gainToDecibels (peak), 1) + " dB"
                      + (peak >= 0.999f ? "  CLIPPED" : ""));
             }
+        }
         }
         p.releaseResources();
         p.setNonRealtime (false);
@@ -217,22 +235,31 @@ private:
     {
         juce::String t;
         t << "// " << name << " - recorded with Amari Sampler " << juce::Time::getCurrentTime().toString (true, true) << "\n";
-        for (int vi = 0; vi < vels.size(); ++vi)
+        bool anyPedal = false, anyNormal = false;
+        for (auto& m : made) (m.pedal ? anyPedal : anyNormal) = true;
+        for (int pg = 0; pg < 2; ++pg)
         {
-            const int lovel = vi == 0 ? 1 : vels[vi - 1] + 1;
-            const int hivel = vi == vels.size() - 1 ? 127 : vels[vi];
-            t << "\n<group> lovel=" << lovel << " hivel=" << hivel << "\n";
-            juce::Array<int> have;
-            for (auto& m : made) if (m.vel == vi) have.addIfNotAlreadyThere (m.note);
-            have.sort();
-            for (int k = 0; k < have.size(); ++k)
+            const bool pedal = pg == 1;
+            if ((pedal && ! anyPedal) || (! pedal && ! anyNormal)) continue;
+            const juce::String cc = ! (anyPedal && anyNormal) ? juce::String() : pedal ? " locc64=64 hicc64=127" : " locc64=0 hicc64=63";
+            if (pedal) t << "\n// ---- sustain pedal down ----\n";
+            for (int vi = 0; vi < vels.size(); ++vi)
             {
-                const int n = have[k];
-                const int lo = k == 0 ? 0 : (have[k - 1] + n) / 2 + 1;
-                const int hi = k == have.size() - 1 ? 127 : (n + have[k + 1]) / 2;
-                for (auto& m : made)
-                    if (m.vel == vi && m.note == n)
-                        t << "<region> sample=" << m.file << " lokey=" << lo << " hikey=" << hi << " pitch_keycenter=" << n << "\n";
+                const int lovel = vi == 0 ? 1 : vels[vi - 1] + 1;
+                const int hivel = vi == vels.size() - 1 ? 127 : vels[vi];
+                t << "\n<group> lovel=" << lovel << " hivel=" << hivel << cc << "\n";
+                juce::Array<int> have;
+                for (auto& m : made) if (m.vel == vi && m.pedal == pedal) have.addIfNotAlreadyThere (m.note);
+                have.sort();
+                for (int k = 0; k < have.size(); ++k)
+                {
+                    const int n = have[k];
+                    const int lo = k == 0 ? 0 : (have[k - 1] + n) / 2 + 1;
+                    const int hi = k == have.size() - 1 ? 127 : (n + have[k + 1]) / 2;
+                    for (auto& m : made)
+                        if (m.vel == vi && m.pedal == pedal && m.note == n)
+                            t << "<region> sample=" << m.file << " lokey=" << lo << " hikey=" << hi << " pitch_keycenter=" << n << "\n";
+                }
             }
         }
         juce::ignoreUnused (notes);

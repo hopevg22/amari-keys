@@ -67,14 +67,14 @@ endif()
 juce_add_gui_app(AmariSampler
     PRODUCT_NAME "Amari Sampler"
     COMPANY_NAME "Amari Labs"
-    VERSION 0.1.0)
+    VERSION 0.2.0)
 target_sources(AmariSampler PRIVATE AmariSampler/Main.cpp)
 target_compile_definitions(AmariSampler PRIVATE
     JUCE_PLUGINHOST_VST3=1
     JUCE_WEB_BROWSER=0
     JUCE_USE_CURL=0
     JUCE_APPLICATION_NAME_STRING="Amari Sampler"
-    JUCE_APPLICATION_VERSION_STRING="0.1.0")
+    JUCE_APPLICATION_VERSION_STRING="0.2.0")
 target_link_libraries(AmariSampler
     PRIVATE
         juce::juce_audio_utils
@@ -89,4 +89,8 @@ if(AMARI_BUILD_TESTS)
     target_sources(SamplerRoundTrip PRIVATE tests/SamplerRoundTrip.cpp)
     target_compile_definitions(SamplerRoundTrip PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0)
     target_link_libraries(SamplerRoundTrip PRIVATE juce::juce_audio_processors juce::juce_audio_formats juce::juce_events)
+    juce_add_console_app(Vst2RoundTrip PRODUCT_NAME "Vst2RoundTrip")
+    target_sources(Vst2RoundTrip PRIVATE tests/Vst2RoundTrip.cpp)
+    target_compile_definitions(Vst2RoundTrip PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0)
+    target_link_libraries(Vst2RoundTrip PRIVATE juce::juce_audio_processors juce::juce_audio_formats juce::juce_events)
 endif()

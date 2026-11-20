@@ -1,6 +1,7 @@
 // Amari Sampler - record any VST3 instrument into a multisample folder for Amari Keys.
 #include <juce_audio_utils/juce_audio_utils.h>
 #include "MultiSampleRenderer.h"
+#include "Vst2Plugin.h"
 
 using namespace juce;
 
@@ -88,7 +89,7 @@ public:
 
         title.setText ("AMARI SAMPLER", dontSendNotification);
         title.setFont (FontOptions (22.0f, Font::bold)); title.setColour (Label::textColourId, Col::text);
-        sub.setText ("record a VST3 instrument into a sample folder for Amari Keys", dontSendNotification);
+        sub.setText ("record a VST3 or VST2 instrument into a sample folder for Amari Keys", dontSendNotification);
         addAndMakeVisible (title); addAndMakeVisible (sub);
 
         addAndMakeVisible (loadBtn); loadBtn.onClick = [this] { choosePlugin(); };
@@ -144,7 +145,7 @@ public:
 
         setSize (760, 760);
         updateSummary(); updateButtons();
-        log ("1) LOAD VST3 and choose your instrument   2) OPEN PLUGIN to pick the sound and switch its effects off   3) START");
+        log ("1) LOAD VST and choose your instrument   2) OPEN PLUGIN to pick the sound and switch its effects off   3) START");
 
         const auto last = props->getValue ("plugin");
         if (last.isNotEmpty() && File (last).exists()) MessageManager::callAsync ([this, last, sp = SafePointer<MainComponent> (this)] { if (sp) loadPlugin (last); });
@@ -203,41 +204,108 @@ public:
 
 private:
     // ---- plugin loading ------------------------------------------------------
+    static Array<File> defaultVst3Folders()
+    {
+       #if JUCE_WINDOWS
+        return { File ("C:\\Program Files\\Common Files\\VST3") };
+       #elif JUCE_MAC
+        return { File ("/Library/Audio/Plug-Ins/VST3") };
+       #else
+        return { File::getSpecialLocation (File::userHomeDirectory).getChildFile (".vst3") };
+       #endif
+    }
+
+    Array<File> vst2Folders() const
+    {
+        Array<File> dirs;
+       #if JUCE_WINDOWS
+        for (auto* d : { "C:\\Program Files\\Steinberg\\VSTPlugins", "C:\\Program Files\\VSTPlugins",
+                         "C:\\Program Files\\Common Files\\VST2", "C:\\Program Files\\Common Files\\Steinberg\\VST2" })
+            dirs.add (File (d));
+       #else
+        dirs.add (File::getSpecialLocation (File::userHomeDirectory).getChildFile (".vst"));
+       #endif
+        StringArray extra; extra.addLines (props->getValue ("vst2dirs"));
+        for (auto& e : extra) if (e.isNotEmpty()) dirs.addIfNotAlreadyThere (File (e));
+        return dirs;
+    }
+
+    static bool isVst2File (const File& f)
+    {
+       #if JUCE_WINDOWS
+        return f.existsAsFile() && f.hasFileExtension ("dll");
+       #elif JUCE_MAC
+        return f.hasFileExtension ("vst");
+       #else
+        return f.existsAsFile() && f.hasFileExtension ("so");
+       #endif
+    }
+
+    static void collect (const File& dir, int depth, bool vst2, Array<File>& out)
+    {
+        if (! dir.isDirectory()) return;
+        for (auto& e : RangedDirectoryIterator (dir, false, "*", File::findFilesAndDirectories))
+        {
+            auto f = e.getFile();
+            if (! vst2 && f.hasFileExtension ("vst3")) out.add (f);
+            else if (vst2 && isVst2File (f)) out.add (f);
+            else if (f.isDirectory() && ! f.hasFileExtension ("vst3") && depth < 3) collect (f, depth + 1, vst2, out);
+        }
+    }
+
     void choosePlugin()
     {
         if (isThreadRunning()) return;
-        Array<File> found;
-        std::function<void (const File&, int)> walk = [&] (const File& d, int depth)
-        {
-            for (auto& e : RangedDirectoryIterator (d, false, "*", File::findFilesAndDirectories))
-            {
-                auto f = e.getFile();
-                if (f.hasFileExtension ("vst3")) found.add (f);
-                else if (f.isDirectory() && depth < 3) walk (f, depth + 1);
-            }
-        };
-       #if JUCE_WINDOWS
-        walk (File ("C:\\Program Files\\Common Files\\VST3"), 0);
-       #elif JUCE_MAC
-        walk (File ("/Library/Audio/Plug-Ins/VST3"), 0);
-       #else
-        walk (File::getSpecialLocation (File::userHomeDirectory).getChildFile (".vst3"), 0);
-       #endif
-        std::sort (found.begin(), found.end(), [] (const File& a, const File& b) { return a.getFileName().compareIgnoreCase (b.getFileName()) < 0; });
+        Array<File> vst3, vst2;
+        for (auto& d : defaultVst3Folders()) collect (d, 0, false, vst3);
+        const auto dirs2 = vst2Folders();
+        for (auto& d : dirs2) collect (d, 0, true, vst2);
+        auto byName = [] (const File& a, const File& b) { return a.getFileName().compareIgnoreCase (b.getFileName()) < 0; };
+        std::sort (vst3.begin(), vst3.end(), byName);
+        std::sort (vst2.begin(), vst2.end(), byName);
 
-        PopupMenu m;
-        for (int i = 0; i < found.size(); ++i) m.addItem (i + 1, found[i].getFileNameWithoutExtension());
-        if (found.isEmpty()) m.addItem (-2, "(no VST3 found in the standard folder)", false);
-        m.addSeparator();
-        m.addItem (-1, "Browse for a .vst3...");
-        m.showMenuAsync (PopupMenu::Options().withTargetComponent (loadBtn), [this, found] (int r)
+        PopupMenu m, m3, m2;
+        for (int i = 0; i < vst3.size(); ++i) m3.addItem (1000 + i, vst3[i].getFileNameWithoutExtension());
+        for (int i = 0; i < vst2.size(); ++i)
         {
-            if (r > 0) loadPlugin (found[r - 1].getFullPathName());
+            auto rel = vst2[i].getRelativePathFrom (vst2[i].getParentDirectory().getParentDirectory()); // show "Folder\Plugin" for nested ones
+            const bool top = dirs2.contains (vst2[i].getParentDirectory());
+            m2.addItem (5000 + i, top ? vst2[i].getFileNameWithoutExtension() : rel.upToLastOccurrenceOf (".", false, false));
+        }
+        if (vst3.isEmpty()) m3.addItem (-9, "(none found)", false);
+        if (vst2.isEmpty()) m2.addItem (-9, "(none found)", false);
+        m.addSubMenu ("VST3  (" + String (vst3.size()) + ")", m3);
+        m.addSubMenu ("VST2  (" + String (vst2.size()) + ")", m2);
+        m.addSeparator();
+        m.addItem (-1, "Browse for a plugin file...");
+        m.addItem (-2, "Add a VST2 folder to the list...");
+
+        m.showMenuAsync (PopupMenu::Options().withTargetComponent (loadBtn), [this, vst3, vst2] (int r)
+        {
+            if (r >= 5000) loadPlugin (vst2[r - 5000].getFullPathName());
+            else if (r >= 1000) loadPlugin (vst3[r - 1000].getFullPathName());
             else if (r == -1)
             {
-                chooser = std::make_unique<FileChooser> ("Choose a VST3 instrument", File(), "*.vst3");
+                chooser = std::make_unique<FileChooser> ("Choose a VST3 or VST2 instrument", File(), "*.vst3;*.dll;*.so;*.vst");
                 chooser->launchAsync (FileBrowserComponent::openMode | FileBrowserComponent::canSelectFiles | FileBrowserComponent::canSelectDirectories,
-                                      [this] (const FileChooser& fc) { auto f = fc.getResult(); if (f.hasFileExtension ("vst3")) loadPlugin (f.getFullPathName()); });
+                                      [this] (const FileChooser& fc)
+                                      {
+                                          auto f = fc.getResult();
+                                          if (f.hasFileExtension ("vst3") || isVst2File (f)) loadPlugin (f.getFullPathName());
+                                      });
+            }
+            else if (r == -2)
+            {
+                chooser = std::make_unique<FileChooser> ("Choose a folder with VST2 plugins", File ("C:\\Program Files"));
+                chooser->launchAsync (FileBrowserComponent::openMode | FileBrowserComponent::canSelectDirectories, [this] (const FileChooser& fc)
+                {
+                    auto d = fc.getResult();
+                    if (! d.isDirectory()) return;
+                    StringArray extra; extra.addLines (props->getValue ("vst2dirs"));
+                    extra.addIfNotAlreadyThere (d.getFullPathName()); extra.removeEmptyStrings();
+                    props->setValue ("vst2dirs", extra.joinIntoString ("\n"));
+                    log ("Added VST2 folder " + d.getFullPathName() + ". Click LOAD VST again to see its plugins.");
+                });
             }
         });
     }
@@ -246,19 +314,34 @@ private:
     {
         pluginWindow.reset();
         plugin.reset();
-        OwnedArray<PluginDescription> types;
-        for (auto* fmt : formats.getFormats()) fmt->findAllTypesForFile (types, path);
-        if (types.isEmpty()) { log ("Could not open " + path); pluginLabel.setText ("No instrument loaded", dontSendNotification); updateButtons(); return; }
-        const PluginDescription* desc = types[0];
-        for (auto* t : types) if (t->isInstrument) { desc = t; break; }
-        String err;
-        plugin = formats.createPluginInstance (*desc, sampleRate(), 512, err);
-        if (! plugin) { log ("Failed to load " + desc->name + ": " + err); updateButtons(); return; }
-        plugin->enableAllBuses();
+        const File file (path);
+        String err, label;
+
+        if (file.hasFileExtension ("vst3"))
+        {
+            OwnedArray<PluginDescription> types;
+            for (auto* fmt : formats.getFormats()) fmt->findAllTypesForFile (types, path);
+            if (types.isEmpty()) { log ("Could not open " + path); pluginLabel.setText ("No instrument loaded", dontSendNotification); updateButtons(); return; }
+            const PluginDescription* desc = types[0];
+            for (auto* t : types) if (t->isInstrument) { desc = t; break; }
+            auto inst = formats.createPluginInstance (*desc, sampleRate(), 512, err);
+            if (! inst) { log ("Failed to load " + desc->name + ": " + err); updateButtons(); return; }
+            inst->enableAllBuses();
+            label = desc->name + "  (" + desc->manufacturerName + ", VST3)" + (desc->isInstrument ? "" : "  - not marked as an instrument");
+            plugin = std::move (inst);
+        }
+        else
+        {
+            auto inst = Vst2Plugin::load (file, sampleRate(), 512, err);
+            if (! inst) { log ("Failed to load " + file.getFileName() + ": " + err); pluginLabel.setText ("No instrument loaded", dontSendNotification); updateButtons(); return; }
+            label = inst->getName() + "  (" + inst->getVendor() + ", VST2)" + (inst->isInstrument() ? "" : "  - not marked as an instrument");
+            plugin = std::move (inst);
+        }
+
         plugin->prepareToPlay (sampleRate(), 512); // let it initialise and start loading its default sound
         props->setValue ("plugin", path);
-        pluginLabel.setText (desc->name + "  (" + desc->manufacturerName + ")" + (desc->isInstrument ? "" : "  - not marked as an instrument"), dontSendNotification);
-        log ("Loaded " + desc->name + ". Open it, choose the sound, and switch off its reverb/delay.");
+        pluginLabel.setText (label, dontSendNotification);
+        log ("Loaded " + plugin->getName() + ". Open it, choose the sound, and switch off its reverb/delay.");
         updateButtons();
     }
 
@@ -381,7 +464,7 @@ private:
 
     DarkLook look;
     AudioPluginFormatManager formats;
-    std::unique_ptr<AudioPluginInstance> plugin;
+    std::unique_ptr<AudioProcessor> plugin;
     std::unique_ptr<PluginWindow> pluginWindow;
     std::unique_ptr<PropertiesFile> props;
     std::unique_ptr<FileChooser> chooser;
@@ -393,7 +476,7 @@ private:
     Rectangle<int> panelArea;
 
     Label title, sub, pluginLabel, summary;
-    TextButton loadBtn { "LOAD VST3" }, showBtn { "OPEN PLUGIN" }, browseBtn { "BROWSE" }, startBtn { "START" }, stopBtn { "STOP" };
+    TextButton loadBtn { "LOAD VST" }, showBtn { "OPEN PLUGIN" }, browseBtn { "BROWSE" }, startBtn { "START" }, stopBtn { "STOP" };
     Label nameL, dirL, loL, hiL, velL, holdL, tailL, silL, stepL, rateL, bitsL, speedL;
     TextEditor nameE, dirE, loE, hiE, velE, holdE, tailE, silE, logBox;
     ComboBox stepC, rateC, bitsC, speedC;
@@ -408,7 +491,7 @@ class AmariSamplerApp : public JUCEApplication
 {
 public:
     const String getApplicationName() override { return "Amari Sampler"; }
-    const String getApplicationVersion() override { return "0.1"; }
+    const String getApplicationVersion() override { return "0.2"; }
     bool moreThanOneInstanceAllowed() override { return false; }
 
     void initialise (const String&) override { window = std::make_unique<MainWindow>(); }

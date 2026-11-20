@@ -34,7 +34,10 @@ The loaded path is saved with the session and reloads automatically.
 - MIDI LEARN: turn it on, click any control, move a knob/slider on your controller.
 
 ## Amari Sampler (tools)
-`AmariSampler/` is a small Windows app that loads any VST3 instrument, plays it note by note at several velocities,
+`AmariSampler/` is a small Windows app that loads any VST3 or 64-bit VST2 instrument, plays it note by note at several velocities,
 trims each note and saves `Name_C#4_v3.wav` files plus `Name.sfz` - ready for LOAD SFZ / LOAD FOLDER in Amari Keys.
 CI artifact: **AmariSampler-Windows**. Engine: `AmariSampler/MultiSampleRenderer.h` (round-trip test: `tests/SamplerRoundTrip.cpp`).
 Personal use only: respect each instrument's licence and never share sampled sounds.
+
+VST2 hosting uses the clean-room, BSD-licensed header from github.com/Xaymar/vst2sdk (`AmariSampler/external/vst2sdk`), no Steinberg VST2 SDK.
+VST2 folders scanned: `C:\Program Files\Steinberg\VSTPlugins`, `C:\Program Files\VSTPlugins`, `C:\Program Files\Common Files\VST2`, `...\Steinberg\VST2`, plus any added in the app.

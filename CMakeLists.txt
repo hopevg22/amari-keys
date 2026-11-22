@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(AmariKeys VERSION 0.5.0)
+project(AmariKeys VERSION 0.6.0)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -65,6 +65,11 @@ if(AMARI_BUILD_TESTS)
     target_sources(PatchTest PRIVATE tests/PatchTest.cpp Source/PluginProcessor.cpp Source/PluginEditor.cpp)
     target_compile_definitions(PatchTest PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JucePlugin_Name="AmariKeys" JUCE_MODAL_LOOPS_PERMITTED=1)
     target_link_libraries(PatchTest PRIVATE juce::juce_audio_utils juce::juce_dsp juce::juce_audio_formats
+        PUBLIC juce::juce_recommended_config_flags)
+    juce_add_console_app(V06Test PRODUCT_NAME "V06Test")
+    target_sources(V06Test PRIVATE tests/V06Test.cpp Source/PluginProcessor.cpp Source/PluginEditor.cpp)
+    target_compile_definitions(V06Test PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JucePlugin_Name="AmariKeys" JUCE_MODAL_LOOPS_PERMITTED=1)
+    target_link_libraries(V06Test PRIVATE juce::juce_audio_utils juce::juce_dsp juce::juce_audio_formats
         PUBLIC juce::juce_recommended_config_flags)
     juce_add_console_app(LayerTest PRODUCT_NAME "LayerTest")
     target_sources(LayerTest PRIVATE tests/LayerTest.cpp Source/PluginProcessor.cpp Source/PluginEditor.cpp)

@@ -41,11 +41,12 @@ struct SynthEngine
         start (v, note, vel, ! legato, true);
     }
 
-    void noteOff (int note)
+    // maxRelease > 0 shortens the amp release for this note (sustain pedal lifted)
+    void noteOff (int note, float maxRelease = -1.0f)
     {
         if (s.voiceMode == 0)
         {
-            for (auto& v : voices) if (v.note == note && v.gateOn) release (v);
+            for (auto& v : voices) if (v.note == note && v.gateOn) { v.relCap = maxRelease; release (v); }
             return;
         }
         removeFromStack (note);
@@ -59,7 +60,12 @@ struct SynthEngine
 
     void render (float* outL, float* outR, int num)
     {
-        for (auto& v : voices) { v.amp.setParameters (s.aenv); v.filt.setParameters (s.fenv); }
+        for (auto& v : voices)
+        {
+            auto a = s.aenv;
+            if (v.relCap > 0.0f && ! v.gateOn) a.release = juce::jmin (a.release, v.relCap);
+            v.amp.setParameters (a); v.filt.setParameters (s.fenv);
+        }
         const float q = 0.55f + s.reso * 9.0f;
         const double glideCoef = s.glide < 0.001f ? 1.0 : 1.0 - std::exp (-1.0 / (sr * (0.005 + s.glide * 0.6)));
         const double detuneRatio = std::pow (2.0, (s.detune * 25.0) / 1200.0);
@@ -118,7 +124,7 @@ struct SynthEngine
 private:
     struct Voice
     {
-        int note = -1; float vel = 0.0f; bool gateOn = false;
+        int note = -1; float vel = 0.0f; bool gateOn = false; float relCap = -1.0f;
         double freq = 440.0, targetFreq = 440.0;
         dspc::Osc o1, o2, sub;
         dspc::SVF f1, f2;
@@ -130,7 +136,7 @@ private:
     {
         const double f = dspc::mtof (note);
         const bool wasActive = v.amp.isActive();
-        v.note = note; v.vel = vel; v.targetFreq = f; v.gateOn = true; v.age = 0;
+        v.note = note; v.vel = vel; v.targetFreq = f; v.gateOn = true; v.age = 0; v.relCap = -1.0f;
         if (! monoGlide || ! wasActive || s.glide < 0.001f) v.freq = f;
         if (retrigger || ! wasActive)
         {
@@ -138,7 +144,12 @@ private:
             v.amp.noteOn(); v.filt.noteOn();
         }
     }
-    void release (Voice& v) { v.gateOn = false; v.amp.noteOff(); v.filt.noteOff(); }
+    void release (Voice& v)
+    {
+        v.gateOn = false;
+        if (v.relCap > 0.0f) { auto a = s.aenv; a.release = juce::jmin (a.release, v.relCap); v.amp.setParameters (a); }
+        v.amp.noteOff(); v.filt.noteOff();
+    }
     void removeFromStack (int note)
     {
         int w = 0;

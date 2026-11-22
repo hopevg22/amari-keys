@@ -84,6 +84,25 @@ public:
     bool isLearnMode() const { return learnMode.load(); }
     void setLearnTarget (const juce::String& paramId);
     juce::String getLearnTargetName() const;
+    // learnable functions that are not parameters
+    enum Action { actPatchPrev = 0, actPatchNext, actDial, actEnter, actPanic, actBrowsePatches, actSelectLayer = 10 };
+    static constexpr int actionBase = 100000;
+    void setLearnAction (int action) { learnTarget.store (actionBase + action); }
+    static juce::String actionName (int action);
+    juce::String targetName (int code) const;
+    struct Mapping { int cc; juce::String name; };
+    juce::Array<Mapping> getMappings() const;
+    void removeMapping (int cc) { ccMap[cc].store (-1); saveMidiMap(); }
+    void clearMappings() { for (auto& c : ccMap) c.store (-1); saveMidiMap(); }
+
+    // ---- data dial: scroll the selected layer's sounds (or patches), ENTER loads (message thread)
+    void setBrowseTarget (int layer);                 // -1 or ORGAN = patches
+    int getBrowseTarget() const { return browseTarget; }
+    void dialStep (int steps);
+    void dialEnter();
+    bool isBrowsePending() const { return browsePending; }
+    std::pair<juce::String, juce::String> getBrowseText() const;
+    int takeSelectRequest() { return selectRequest.exchange (-1); } // hardware "select layer" for the editor
     std::atomic<int> learnHits { 0 };
 
     void panic() { panicRequest.store (true); }
@@ -106,7 +125,7 @@ private:
     void updateSettings();
     void renderSegment (int start, int num);
     void triggerPadAudio (int pad, float vel); // audio thread
-    void noteOffLayer (int l, int note);
+    void noteOffLayer (int l, int note, bool pedalLifted = false);
     float param (const juce::String& id) const { return apvts.getRawParameterValue (id)->load(); }
 
     Layer layers[numLayers];
@@ -135,6 +154,14 @@ private:
     std::atomic<bool> panicRequest { false }, learnMode { false };
     std::atomic<int> learnTarget { -1 };
     std::atomic<int> ccMap[128];
+    int ccLast[128] {};                                  // audio thread: last value per CC (buttons, dial)
+    std::atomic<int> pendingDial { 0 }, pendingActions { 0 }, pendingSelect { -1 }, selectRequest { -1 };
+    int browseTarget = -1, browseIndex = -1; bool browsePending = false;
+    juce::Array<AmariLibrary::Sound> browseList;
+    void refreshBrowseList();
+    void saveMidiMap();
+    void loadMidiMap (const juce::String& map);
+    std::atomic<bool> midiMapDirty { false };
     juce::Array<juce::AudioProcessorParameter*> paramList;
 
     // effects

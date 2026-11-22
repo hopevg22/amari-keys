@@ -103,10 +103,11 @@ class Lcd : public juce::Component
 {
 public:
     std::function<std::pair<juce::String, juce::String>()> text;
-    std::function<void()> onDoubleClick;
+    std::function<void()> onDoubleClick, onClick;
     bool big = false;
     void paint (juce::Graphics&) override;
     void mouseDoubleClick (const juce::MouseEvent&) override { if (onDoubleClick) onDoubleClick(); }
+    void mouseUp (const juce::MouseEvent& e) override { if (onClick && e.getNumberOfClicks() == 1 && ! e.mouseWasDraggedSinceMouseDown()) onClick(); }
 };
 
 class PadButton : public juce::Component
@@ -136,6 +137,33 @@ private:
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> faderAtt;
     juce::Rectangle<int> zoneArea;
 };
+// Endless data dial (MODX style): drag or scroll to step, double-click = ENTER.
+class DataDial : public juce::Component
+{
+public:
+    std::function<void (int)> onStep;
+    std::function<void()> onEnter;
+    void paint (juce::Graphics&) override;
+    void mouseDown (const juce::MouseEvent&) override { dragAcc = 0.0f; lastY = 0; }
+    void mouseDrag (const juce::MouseEvent& e) override
+    {
+        const int y = e.getDistanceFromDragStartY();
+        dragAcc += (float) (lastY - y); lastY = y;
+        while (dragAcc >= 7.0f) { dragAcc -= 7.0f; step (1); }
+        while (dragAcc <= -7.0f) { dragAcc += 7.0f; step (-1); }
+    }
+    void mouseWheelMove (const juce::MouseEvent&, const juce::MouseWheelDetails& w) override
+    {
+        wheelAcc += w.deltaY * (w.isReversed ? -1.0f : 1.0f) * 8.0f;
+        while (wheelAcc >= 1.0f) { wheelAcc -= 1.0f; step (1); }
+        while (wheelAcc <= -1.0f) { wheelAcc += 1.0f; step (-1); }
+    }
+    void mouseDoubleClick (const juce::MouseEvent&) override { if (onEnter) onEnter(); }
+private:
+    void step (int d) { angle += 0.26f * (float) d; repaint(); if (onStep) onStep (d); }
+    float angle = 0.0f, dragAcc = 0.0f, wheelAcc = 0.0f; int lastY = 0;
+};
+
 // Pitch bend / modulation wheel. Drag up and down; the pitch wheel springs back to the centre.
 class Wheel : public juce::Component, private juce::Timer
 {
@@ -166,7 +194,7 @@ public:
     void resized() override;
     void mouseDown (const juce::MouseEvent&) override;
 
-    static constexpr int baseW = 1840, baseH = 640;
+    static constexpr int baseW = 1924, baseH = 640;
 
 private:
     void timerCallback() override;
@@ -178,6 +206,7 @@ private:
     void showPatchMenu();
     void askName (const juce::String& title, const juce::String& message, const juce::String& initial, std::function<void (juce::String)> done);
     void stepPatch (int delta);
+    void showMidiMap();
 
     struct Content : public juce::Component
     {
@@ -203,7 +232,8 @@ private:
     int lastPadHits[AmariKeysProcessor::numPads] {};
     ak::ChannelStrip* strips[AmariKeysProcessor::numLayers] {};
     juce::TextButton prevPatch { "<" }, nextPatch { ">" }, browsePatch { "BROWSE" }, saveAsPatch { "SAVE AS" }, renamePatchBtn { "RENAME" }, deletePatchBtn { "DELETE" };
-    juce::TextButton storeButton { "STORE" }, panicButton { "PANIC" }, learnButton { "MIDI LEARN" };
+    juce::TextButton storeButton { "STORE" }, panicButton { "PANIC" }, learnButton { "MIDI LEARN" }, mapButton { "MIDI MAP" }, enterButton { "ENTER" };
+    ak::DataDial* dataDial = nullptr;
     juce::TextButton keysLoadFolder { "LOAD FOLDER" }, keysLoadSfz { "LOAD SFZ" }, synLoadFolder { "FOLDER" }, synLoadSfz { "SFZ" };
     juce::TextButton keysSounds { "SOUNDS" }, keysSaveSound { "SAVE SOUND" }, synSounds { "SOUNDS" }, synSaveSound { "SAVE" };
     juce::Slider splitNote, transpose, bendRange;

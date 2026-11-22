@@ -521,13 +521,19 @@ struct SamplerEngine
         v->inc = std::pow (2.0, (note - z->root + z->tuneCents / 100.0) / 12.0) * z->sourceRate / sr;
         v->gain = hit.gain * z->gain * z->norm * outputGain; // plays each sample at its recorded level
     }
-    void noteOff (int note) { for (auto& v : voices) if (v.active && v.note == note) v.released = true; }
+    // release = time to fade to silence (-60 dB). maxTime > 0 shortens it (sustain pedal lifted).
+    void noteOff (int note, float maxTime = -1.0f)
+    {
+        float t = juce::jmax (0.02f, release);
+        if (maxTime > 0.0f) t = juce::jmin (t, maxTime);
+        const float coef = (float) std::exp (std::log (0.001) / (sr * t));
+        for (auto& v : voices) if (v.active && v.note == note && ! v.released) { v.released = true; v.relCoef = coef; }
+    }
     void allOff() { for (auto& v : voices) v.active = false; }
 
     void render (float* outL, float* outR, int num)
     {
         if (! set) return;
-        const float relCoef = (float) std::exp (-1.0 / (sr * juce::jmax (0.02f, release)));
         const float fastCoef = (float) std::exp (-1.0 / (sr * 0.03));
         const float k = 1.0f / 32767.0f;
         for (auto& v : voices)
@@ -551,7 +557,7 @@ struct SamplerEngine
                 };
                 l = herm (0); r = ch > 1 ? herm (1) : l;
                 v.att = juce::jmin (1.0f, v.att + 0.02f);
-                if (v.released) v.env *= v.fastRelease ? fastCoef : relCoef;
+                if (v.released) v.env *= v.fastRelease ? fastCoef : v.relCoef;
                 const float a = v.att * v.env * v.gain;
                 outL[i] += l * a; outR[i] += r * a;
                 v.pos += v.inc * pitchMul;
@@ -576,6 +582,7 @@ private:
     struct Voice
     {
         bool active = false, released = false, fastRelease = false;
+        float relCoef = 0.999f;
         int note = 0; const SampleZone* zone = nullptr;
         double pos = 0.0, inc = 1.0; float gain = 1.0f, env = 1.0f, att = 0.0f; uint32_t age = 0;
     };

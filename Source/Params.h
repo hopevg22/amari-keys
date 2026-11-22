@@ -5,12 +5,20 @@ namespace Params
 {
 using APVTS = juce::AudioProcessorValueTreeState;
 
-// ---- layer layout: 8 instrument groups
-constexpr int numLayers = 8;
+// ---- layer layout: 10 instrument groups
+constexpr int numLayers = 10;
 enum class Kind { Keys, Organ, Synth };
-inline Kind kindOf (int layer) { return layer == 2 ? Kind::Organ : (layer <= 3 ? Kind::Keys : Kind::Synth); } // 0,1,3 keys; 2 organ; 4-7 synth
-inline const char* layerShort (int l) { static const char* n[] = { "PIANO", "E.PIANO", "ORGAN", "KEYS", "STRINGS", "BRASS", "PADS", "SYNTH" }; return n[l]; }
-inline const char* layerLong (int l)  { static const char* n[] = { "PIANO", "ELECTRIC PIANO", "ORGAN", "KEYS & MALLETS", "STRINGS", "BRASS & WINDS", "PADS & CHOIR", "SYNTH" }; return n[l]; }
+inline Kind kindOf (int layer) { return layer == 2 ? Kind::Organ : (layer <= 3 ? Kind::Keys : Kind::Synth); } // 0,1,3 keys; 2 organ; 4-9 synth engine + samples
+inline const char* layerShort (int l) { static const char* n[] = { "PIANO", "E.PIANO", "ORGAN", "KEYS", "STRINGS", "BRASS", "PADS", "SYNTH", "BASS", "SFX" }; return n[l]; }
+inline const char* layerLong (int l)  { static const char* n[] = { "PIANO", "ELECTRIC PIANO", "ORGAN", "KEYS & MALLETS", "STRINGS", "BRASS & WINDS", "PADS & CHOIR", "SYNTH", "BASS", "SOUND FX" }; return n[l]; }
+constexpr int sfxLayer = 9;   // plays loaded samples only (no built-in sound)
+// Tail when the sustain pedal is lifted: strings, brass, pads and SFX keep a short adjustable tail
+// (PAD TAIL), sampled keys sound like dampers, synth lead and bass stop quickly.
+inline float pedalTailFor (int layer, float padTail)
+{
+    if (layer == 4 || layer == 5 || layer == 6 || layer == sfxLayer) return padTail;
+    return kindOf (layer) == Kind::Keys ? 0.5f : 0.3f;
+}
 inline juce::String lid (int layer, const char* name) { return "l" + juce::String (layer + 1) + "_" + name; }
 
 inline juce::StringArray zones()        { return { "LO", "UP", "ALL" }; }
@@ -39,6 +47,8 @@ inline SynthPreset synthPreset (int layer)
         case 4:  return { 0, 0, 0, 0, 0.5f, 0.55f, 0.0f, 3200.0f, 0.10f, 0.15f, 0.3f, 0.06f, 0.3f, 0.3f, 1.0f, 0.8f, 1.2f, 0.35f, 1.0f, 0.9f, 1.1f };   // strings
         case 5:  return { 0, 0, 0, 0, 0.5f, 0.25f, 0.0f, 700.0f, 0.15f, 0.55f, 0.5f, 0.0f, 5.0f, 0.06f, 0.5f, 0.5f, 0.3f, 0.03f, 0.6f, 0.85f, 0.25f };   // brass
         case 6:  return { 0, 0, 2, 0, 0.4f, 0.40f, 0.0f, 1500.0f, 0.20f, 0.25f, 0.3f, 0.15f, 0.25f, 1.2f, 2.0f, 0.6f, 2.5f, 1.0f, 1.5f, 0.9f, 2.6f };   // pads
+        case 8:  return { 1, 0, 1, 0, 0.4f, 0.06f, 0.0f, 650.0f, 0.25f, 0.45f, 0.3f, 0.0f, 5.0f, 0.003f, 0.35f, 0.2f, 0.2f, 0.003f, 0.6f, 0.8f, 0.15f }; // bass
+        case 9:  return { 0, 2, 3, 0, 0.5f, 0.20f, 0.0f, 4000.0f, 0.10f, 0.20f, 0.3f, 0.10f, 0.4f, 0.5f, 1.0f, 0.7f, 1.0f, 0.2f, 1.0f, 0.9f, 1.0f };    // sfx (samples only)
         default: return { 2, 1, 0, 0, 0.5f, 0.15f, 0.1f, 2600.0f, 0.35f, 0.40f, 0.5f, 0.0f, 5.0f, 0.005f, 0.4f, 0.4f, 0.3f, 0.003f, 0.3f, 0.9f, 0.25f }; // lead
     }
 }
@@ -65,6 +75,7 @@ inline APVTS::ParameterLayout createLayout()
     in ("transpose", "Transpose", -12, 12, 0);
     ch ("vel_curve", "Velocity Curve", velCurves(), 1);
     in ("bend_range", "Pitch Bend Range", 1, 12, 2);
+    fl ("pedal_tail", "Pad Tail (Pedal Up)", 0.1f, 3.0f, 0.8f, 0.8f);
 
     // ---- layers
     for (int l = 0; l < numLayers; ++l)
@@ -87,7 +98,7 @@ inline APVTS::ParameterLayout createLayout()
         else if (kind == Kind::Synth)
         {
             const auto s = synthPreset (l);
-            ch (lid (l, "src"), nm + " Source", sources(), 0);
+            ch (lid (l, "src"), nm + " Source", sources(), l == sfxLayer ? 1 : 0);
             ch (lid (l, "voice"), nm + " Voice Mode", voiceModes(), s.voice);
             ch (lid (l, "wave1"), nm + " Osc 1", waves(), s.w1);
             ch (lid (l, "wave2"), nm + " Osc 2", waves(), s.w2);

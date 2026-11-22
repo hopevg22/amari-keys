@@ -11,6 +11,7 @@ AmariKeysProcessor::AmariKeysProcessor()
     for (auto& c : ccMap) c.store (-1);
     paramList = getParameters();
     patches = AmariLibrary::loadPatches();
+    loadMidiMap (AmariLibrary::settings().getValue ("midimap"));
     startTimerHz (30);
 }
 
@@ -39,6 +40,25 @@ void AmariKeysProcessor::timerCallback()
     // program change requested from a MIDI pad
     const int req = programRequest.exchange (-1);
     if (req >= 0 && req < getPatchCount()) recallPatch (req);
+    // hardware controls learned to functions
+    if (midiMapDirty.exchange (false)) saveMidiMap();
+    const int sel = pendingSelect.exchange (-1);
+    if (sel >= 0) { setBrowseTarget (sel); selectRequest.store (sel); }
+    const int acts = pendingActions.exchange (0);
+    if (acts & (1 << actBrowsePatches)) setBrowseTarget (-1);
+    if (acts & ((1 << actPatchPrev) | (1 << actPatchNext)))
+    {
+        reloadPatches();
+        const int n = getPatchCount();
+        if (n > 0)
+        {
+            const int cur = getCurrentPatch(), d = (acts & (1 << actPatchNext)) ? 1 : -1;
+            recallPatch (cur < 0 ? (d > 0 ? 0 : n - 1) : (cur + d + n) % n);
+        }
+    }
+    const int dial = pendingDial.exchange (0) / 2; // two knob values per step
+    if (dial != 0) dialStep (dial);
+    if (acts & (1 << actEnter)) dialEnter();
 }
 
 void AmariKeysProcessor::loadSamples (int layer, const juce::File& source)
@@ -165,10 +185,19 @@ void AmariKeysProcessor::recallPatch (int index)
     auto t = patches.getChild (index);
     currentPatch.store (index);
     apvts.state.setProperty ("patchName", t.getProperty ("name"), nullptr);
+    juce::StringArray stored;
     for (auto v : t)
         if (v.hasType ("V"))
             if (auto* prm = apvts.getParameter (v.getProperty ("id").toString()))
+            {
                 prm->setValueNotifyingHost ((float) v.getProperty ("v"));
+                stored.add (v.getProperty ("id").toString());
+            }
+    // settings a patch doesn't know (e.g. layers added later: BASS, SFX) go back to their defaults
+    for (auto* prm : paramList)
+        if (auto* r = dynamic_cast<juce::RangedAudioParameter*> (prm))
+            if (! stored.contains (r->getParameterID()) && r->getParameterID() != "master")
+                r->setValueNotifyingHost (r->getDefaultValue());
     // each layer's sound: load what the patch uses (skip if already loaded), unload layers it doesn't use
     for (int l = 0; l < numLayers; ++l)
     {
@@ -282,10 +311,135 @@ void AmariKeysProcessor::setLearnTarget (const juce::String& paramId)
             if (r->getParameterID() == paramId) { learnTarget.store (i); return; }
 }
 
-juce::String AmariKeysProcessor::getLearnTargetName() const
+juce::String AmariKeysProcessor::actionName (int a)
 {
-    const int t = learnTarget.load();
+    switch (a)
+    {
+        case actPatchPrev: return "PATCH <";
+        case actPatchNext: return "PATCH >";
+        case actDial: return "DATA DIAL";
+        case actEnter: return "ENTER";
+        case actPanic: return "PANIC";
+        case actBrowsePatches: return "DIAL: BROWSE PATCHES";
+        default: break;
+    }
+    if (a >= actSelectLayer && a < actSelectLayer + numLayers) return juce::String ("SELECT ") + Params::layerShort (a - actSelectLayer);
+    return "?";
+}
+
+juce::String AmariKeysProcessor::targetName (int t) const
+{
+    if (t >= actionBase) return actionName (t - actionBase);
     return t >= 0 && t < paramList.size() ? paramList[t]->getName (40) : juce::String();
+}
+
+juce::String AmariKeysProcessor::getLearnTargetName() const { return targetName (learnTarget.load()); }
+
+juce::Array<AmariKeysProcessor::Mapping> AmariKeysProcessor::getMappings() const
+{
+    juce::Array<Mapping> out;
+    for (int c = 0; c < 128; ++c) if (ccMap[c].load() >= 0) out.add ({ c, targetName (ccMap[c].load()) });
+    return out;
+}
+
+// The MIDI map belongs to your controller, not to one project: kept in the Amari Keys settings.
+void AmariKeysProcessor::saveMidiMap()
+{
+    juce::String map;
+    for (int c = 0; c < 128; ++c)
+    {
+        const int t = ccMap[c].load();
+        if (t >= actionBase) map << c << "=@" << (t - actionBase) << ";";
+        else if (t >= 0 && t < paramList.size())
+            if (auto* r = dynamic_cast<juce::RangedAudioParameter*> (paramList[t])) map << c << "=" << r->getParameterID() << ";";
+    }
+    AmariLibrary::settings().setValue ("midimap", map);
+    AmariLibrary::settings().saveIfNeeded();
+}
+
+void AmariKeysProcessor::loadMidiMap (const juce::String& mapText)
+{
+    for (auto& c : ccMap) c.store (-1);
+    juce::StringArray pairs; pairs.addTokens (mapText, ";", "");
+    for (auto& pr : pairs)
+    {
+        const int cc = pr.upToFirstOccurrenceOf ("=", false, false).getIntValue();
+        const auto id = pr.fromFirstOccurrenceOf ("=", false, false);
+        if (id.isEmpty() || cc < 0 || cc > 127) continue;
+        if (id.startsWith ("@")) { ccMap[cc].store (actionBase + id.substring (1).getIntValue()); continue; }
+        for (int i = 0; i < paramList.size(); ++i)
+            if (auto* r = dynamic_cast<juce::RangedAudioParameter*> (paramList[i]))
+                if (r->getParameterID() == id) ccMap[cc].store (i);
+    }
+}
+
+// ---- data dial ----------------------------------------------------------------
+void AmariKeysProcessor::refreshBrowseList()
+{
+    browseList.clear();
+    if (browseTarget >= 0) browseList = AmariLibrary::soundsFor (AmariLibrary::groupFolder (browseTarget));
+}
+
+void AmariKeysProcessor::setBrowseTarget (int layer)
+{
+    browseTarget = (layer < 0 || Params::kindOf (layer) == Kind::Organ) ? -1 : layer;
+    browsePending = false; browseIndex = -1;
+    refreshBrowseList();
+}
+
+void AmariKeysProcessor::dialStep (int steps)
+{
+    if (steps == 0) return;
+    if (browseTarget < 0)
+    {
+        reloadPatches();
+        const int n = getPatchCount(); if (n == 0) return;
+        if (browseIndex < 0) browseIndex = juce::jmax (0, getCurrentPatch());
+        browseIndex = juce::jlimit (0, n - 1, browseIndex + steps);
+    }
+    else
+    {
+        if (browseList.isEmpty() || ! browsePending) refreshBrowseList();
+        const int n = browseList.size(); if (n == 0) return;
+        if (browseIndex < 0)
+        {   // start from the sound that is loaded now
+            browseIndex = 0;
+            const juce::File cur (getSamplePath (browseTarget));
+            for (int i = 0; i < n; ++i) if (juce::File (browseList[i].path) == cur) { browseIndex = i; break; }
+            if (cur == juce::File() || juce::File (browseList[browseIndex].path) != cur) steps = steps > 0 ? steps - 1 : steps; // first step lands on the first sound
+        }
+        browseIndex = juce::jlimit (0, n - 1, browseIndex + steps);
+    }
+    browsePending = true;
+}
+
+void AmariKeysProcessor::dialEnter()
+{
+    if (! browsePending || browseIndex < 0) return;
+    if (browseTarget < 0) { if (browseIndex < getPatchCount()) recallPatch (browseIndex); }
+    else if (browseIndex < browseList.size())
+    {
+        const juce::File f (browseList[browseIndex].path);
+        if (f.exists()) loadSamples (browseTarget, f);
+        // make sure the layer plays its samples and can be heard
+        if (auto* on = apvts.getParameter (lid (browseTarget, "on"))) on->setValueNotifyingHost (1.0f);
+    }
+    browsePending = false; browseIndex = -1;
+}
+
+std::pair<juce::String, juce::String> AmariKeysProcessor::getBrowseText() const
+{
+    if (! browsePending) return {};
+    if (browseTarget < 0)
+    {
+        const int n = getPatchCount();
+        return { juce::String (browseIndex + 1).paddedLeft ('0', 3) + "  " + getPatchName (browseIndex).toUpperCase(),
+                 "PATCH " + juce::String (browseIndex + 1) + " OF " + juce::String (n) + "   |   ENTER TO LOAD" };
+    }
+    const int n = browseList.size();
+    const auto name = browseIndex >= 0 && browseIndex < n ? browseList[browseIndex].name : juce::String ("-");
+    return { juce::String (Params::layerShort (browseTarget)) + "  " + name.toUpperCase(),
+             "SOUND " + juce::String (browseIndex + 1) + " OF " + juce::String (n) + "   |   ENTER TO LOAD" };
 }
 
 //==============================================================================
@@ -358,14 +512,16 @@ void AmariKeysProcessor::updateSettings()
     }
 }
 
-void AmariKeysProcessor::noteOffLayer (int l, int note)
+// pedalLifted: the note was only held by the sustain pedal - end it with a short, natural tail
+void AmariKeysProcessor::noteOffLayer (int l, int note, bool pedalLifted)
 {
     auto& L = layers[l];
+    const float cap = pedalLifted ? Params::pedalTailFor (l, param ("pedal_tail")) : -1.0f;
     switch (Params::kindOf (l))
     {
         case Kind::Organ: organ.noteOff (note); break;
-        case Kind::Keys:  L.keys.noteOff (note); L.sampler.noteOff (note); break;
-        case Kind::Synth: L.synth.noteOff (note); L.sampler.noteOff (note); break;
+        case Kind::Keys:  L.keys.noteOff (note); L.sampler.noteOff (note, cap); break;
+        case Kind::Synth: L.synth.noteOff (note, cap); L.sampler.noteOff (note, cap); break;
     }
 }
 
@@ -410,7 +566,7 @@ void AmariKeysProcessor::handleMidi (const juce::MidiMessage& m)
                     break;
                 case Kind::Synth:
                     if ((int) param (lid (l, "src")) == 1 && L.live != nullptr) L.sampler.noteOn (ln, vel, sustain);
-                    else L.synth.noteOn (ln, vel);
+                    else if (l != Params::sfxLayer) L.synth.noteOn (ln, vel); // SFX: samples only
                     break;
             }
             L.down[ln] = true; L.heldSus[ln] = false;
@@ -442,20 +598,41 @@ void AmariKeysProcessor::handleMidi (const juce::MidiMessage& m)
             if (! sustain)
                 for (int l = 0; l < numLayers; ++l)
                     for (int i = 0; i < 128; ++i)
-                        if (layers[l].heldSus[i]) { layers[l].heldSus[i] = false; if (! layers[l].down[i]) noteOffLayer (l, i); }
+                        if (layers[l].heldSus[i]) { layers[l].heldSus[i] = false; if (! layers[l].down[i]) noteOffLayer (l, i, true); }
             return;
         }
         if (m.isAllNotesOff() || m.isAllSoundOff()) { panic(); return; }
         if (cc == 1) wheelMod.store ((float) val / 127.0f); // mod wheel (can also be MIDI-learned below)
+        const int prevVal = ccLast[cc]; ccLast[cc] = val;
         if (learnMode.load() && learnTarget.load() >= 0)
         {
             for (auto& c : ccMap) if (c.load() == learnTarget.load()) c.store (-1);
             ccMap[cc].store (learnTarget.load());
             learnTarget.store (-1);
             learnHits++;
+            midiMapDirty.store (true);
+            return; // the move that taught it doesn't also trigger it
         }
         const int target = ccMap[cc].load();
-        if (target >= 0 && target < paramList.size())
+        if (target >= actionBase)
+        {
+            const int a = target - actionBase;
+            if (a == actDial)
+            {
+                // absolute knob: step with the movement; endless encoders (1/127 or 63/65 repeats) step by one
+                int delta = val - prevVal;
+                if (delta == 0) delta = val < 64 ? 1 : -1;
+                else if (std::abs (delta) > 32) delta = val < 64 ? 1 : -1;
+                pendingDial += delta;
+            }
+            else if (val >= 64 && prevVal < 64) // buttons: act on press
+            {
+                if (a == actPanic) panic();
+                else if (a >= actSelectLayer) pendingSelect.store (a - actSelectLayer);
+                else pendingActions.fetch_or (1 << a);
+            }
+        }
+        else if (target >= 0 && target < paramList.size())
             paramList[target]->setValueNotifyingHost ((float) val / 127.0f);
     }
     else if (m.isPitchWheel())
@@ -695,12 +872,7 @@ void AmariKeysProcessor::getStateInformation (juce::MemoryBlock& destData)
     auto state = apvts.copyState();
     state.removeChild (state.getChildWithName ("PROGRAMS"), nullptr);
     state.setProperty ("patchIndex", currentPatch.load(), nullptr);
-    juce::String map;
-    for (int c = 0; c < 128; ++c)
-        if (ccMap[c].load() >= 0)
-            if (auto* r = dynamic_cast<juce::RangedAudioParameter*> (paramList[ccMap[c].load()]))
-                map << c << "=" << r->getParameterID() << ";";
-    state.setProperty ("ccmap", map, nullptr);
+    state.removeProperty ("ccmap", nullptr); // the MIDI map is global now (Amari Keys settings)
     if (auto xml = state.createXml()) copyXmlToBinary (*xml, destData);
 }
 
@@ -725,16 +897,10 @@ void AmariKeysProcessor::setStateInformation (const void* data, int sizeInBytes)
         }
         currentPatch.store (idx);
     }
-    for (auto& c : ccMap) c.store (-1);
-    juce::StringArray pairs; pairs.addTokens (apvts.state.getProperty ("ccmap").toString(), ";", "");
-    for (auto& pr : pairs)
-    {
-        const int cc = pr.upToFirstOccurrenceOf ("=", false, false).getIntValue();
-        const auto id = pr.fromFirstOccurrenceOf ("=", false, false);
-        if (id.isEmpty() || cc < 0 || cc > 127) continue;
-        for (int i = 0; i < paramList.size(); ++i)
-            if (auto* r = dynamic_cast<juce::RangedAudioParameter*> (paramList[i]))
-                if (r->getParameterID() == id) ccMap[cc].store (i);
+    {   // older projects kept their own MIDI map: adopt it once if no global map exists yet
+        const auto old = apvts.state.getProperty ("ccmap").toString();
+        if (old.isNotEmpty() && AmariLibrary::settings().getValue ("midimap").isEmpty()) { loadMidiMap (old); saveMidiMap(); }
+        apvts.state.removeProperty ("ccmap", nullptr);
     }
     // reload sample sets (one at a time, queued)
     for (int l = 0; l < numLayers; ++l)

@@ -15,8 +15,8 @@ struct AmariLibrary
     // sample groups = the layers that can play samples (ORGAN is the tonewheel engine)
     static juce::String groupFolder (int layer)
     {
-        static const char* names[8] = { "Piano", "E.Piano", "Organ", "Keys", "Strings", "Brass", "Pads", "Synth" };
-        return names[juce::jlimit (0, 7, layer)];
+        static const char* names[10] = { "Piano", "E.Piano", "Organ", "Keys", "Strings", "Brass", "Pads", "Synth", "Bass", "SFX" };
+        return names[juce::jlimit (0, 9, layer)];
     }
 
     // ---- settings / folders ---------------------------------------------------

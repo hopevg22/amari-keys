@@ -221,6 +221,7 @@ void LedList::paint (Graphics& g)
 }
 void LedList::mouseDown (const MouseEvent& e)
 {
+    if (e.mods.isPopupMenu()) return;
     const int rows = (options.size() + columns - 1) / columns;
     const float cw = (float) getWidth() / columns, ch = (float) getHeight() / rows;
     const int idx = jlimit (0, rows - 1, (int) (e.position.y / ch)) * columns + jlimit (0, columns - 1, (int) (e.position.x / cw));
@@ -262,9 +263,9 @@ void Drawbar::setFromY (float y)
     const int v = jlimit (0, 8, roundToInt ((y - 10.0f) / travel * 8.0f));
     if (v != value) att->setValueAsPartOfGesture ((float) v);
 }
-void Drawbar::mouseDown (const MouseEvent& e) { att->beginGesture(); setFromY (e.position.y); }
-void Drawbar::mouseDrag (const MouseEvent& e) { setFromY (e.position.y); }
-void Drawbar::mouseUp (const MouseEvent&) { att->endGesture(); }
+void Drawbar::mouseDown (const MouseEvent& e) { if (e.mods.isPopupMenu()) return; att->beginGesture(); setFromY (e.position.y); }
+void Drawbar::mouseDrag (const MouseEvent& e) { if (! e.mods.isPopupMenu()) setFromY (e.position.y); }
+void Drawbar::mouseUp (const MouseEvent& e) { if (! e.mods.isPopupMenu()) att->endGesture(); }
 
 //==============================================================================
 void Lcd::paint (Graphics& g)
@@ -303,6 +304,7 @@ void PadButton::paint (Graphics& g)
 }
 void PadButton::mouseDown (const MouseEvent& e)
 {
+    if (e.mods.isPopupMenu()) return;
     const float vel = jlimit (0.35f, 1.0f, 1.0f - e.position.getDistanceFrom (getLocalBounds().getCentre().toFloat()) / (float) getWidth());
     proc.padPressed (index, vel);
 }
@@ -346,6 +348,7 @@ void ChannelStrip::paint (Graphics& g)
 }
 void ChannelStrip::mouseDown (const MouseEvent& e)
 {
+    if (e.mods.isPopupMenu()) return;
     if (zoneArea.contains (e.getPosition()))
     {
         auto* prm = proc.apvts.getParameter (lid (layer, "zone"));
@@ -407,14 +410,15 @@ void Wheel::paint (Graphics& g)
     g.drawText (caption, getLocalBounds().removeFromBottom (14), Justification::centred, false);
 }
 
-void Wheel::mouseDown (const MouseEvent&) { stopTimer(); dragging = true; startValue = value; }
+void Wheel::mouseDown (const MouseEvent& e) { if (e.mods.isPopupMenu()) return; stopTimer(); dragging = true; startValue = value; }
 void Wheel::mouseDrag (const MouseEvent& e)
 {
+    if (e.mods.isPopupMenu() || ! dragging) return;
     const float h = wheelArea().getHeight();
     const float dv = -(float) e.getDistanceFromDragStartY() / h * (pitch ? 2.0f : 1.0f);
     set (jlimit (pitch ? -1.0f : 0.0f, 1.0f, startValue + dv));
 }
-void Wheel::mouseUp (const MouseEvent&) { dragging = false; if (pitch) startTimerHz (60); }
+void Wheel::mouseUp (const MouseEvent& e) { if (e.mods.isPopupMenu()) return; dragging = false; if (pitch) startTimerHz (60); }
 void Wheel::timerCallback() // spring back to the centre
 {
     const float v = value * 0.6f;
@@ -460,13 +464,13 @@ AmariKeysEditor::AmariKeysEditor (AmariKeysProcessor& p)
         content.addAndMakeVisible (transpose); transpose.setBounds (x + 12, top + 138, 80, 22);
         transAtt = std::make_unique<AudioProcessorValueTreeState::SliderAttachment> (s, "transpose", transpose);
         rules.add ({ x + 12, top + 176, 80, 1 });
-        styleBtn (learnButton, true); learnButton.setBounds (x + 12, top + 190, 80, 22);
-        learnButton.setClickingTogglesState (true);
-        learnButton.onClick = [this] { proc.setLearnMode (learnButton.getToggleState()); };
-        styleBtn (panicButton, false); panicButton.setBounds (x + 12, top + 218, 80, 22);
-        panicButton.onClick = [this] { if (! proc.isLearnMode()) proc.panic(); };
+        cap (x + 12, top + 186, 80, "MIDI LEARN:");
+        cap (x + 12, top + 198, 80, "RIGHT-CLICK");
+        cap (x + 12, top + 210, 80, "ANY CONTROL");
+        styleBtn (panicButton, false); panicButton.setBounds (x + 12, top + 226, 80, 22);
+        panicButton.onClick = [this] { proc.panic(); };
         panicButton.getProperties().set ("learnAction", AmariKeysProcessor::actPanic);
-        styleBtn (mapButton, false); mapButton.setBounds (x + 12, top + 246, 80, 22);
+        styleBtn (mapButton, false); mapButton.setBounds (x + 12, top + 252, 80, 22);
         mapButton.onClick = [this] { showMidiMap(); };
         place (make<Knob> (s, "pedal_tail", "PAD TAIL", 30), x + 12, top + 280, 80, 56);
     }
@@ -543,11 +547,11 @@ AmariKeysEditor::AmariKeysEditor (AmariKeysProcessor& p)
         progLcd->getProperties().set ("learnAction", AmariKeysProcessor::actBrowsePatches);
         dataDial = make<DataDial>(); dataDial->setBounds (x + w - 12 - 116, top + 34, 66, 66);
         dataDial->getProperties().set ("learnAction", AmariKeysProcessor::actDial);
-        dataDial->onStep = [this] (int d) { if (! proc.isLearnMode()) { proc.dialStep (d); progLcd->repaint(); } };
-        dataDial->onEnter = [this] { if (! proc.isLearnMode()) { proc.dialEnter(); content.repaint(); } };
+        dataDial->onStep = [this] (int d) { proc.dialStep (d); progLcd->repaint(); };
+        dataDial->onEnter = [this] { proc.dialEnter(); content.repaint(); };
         styleBtn (enterButton, false); enterButton.setBounds (x + w - 12 - 46, top + 56, 46, 22);
         enterButton.getProperties().set ("learnAction", AmariKeysProcessor::actEnter);
-        enterButton.onClick = [this] { if (! proc.isLearnMode()) { proc.dialEnter(); content.repaint(); } };
+        enterButton.onClick = [this] { proc.dialEnter(); content.repaint(); };
         cap (x + w - 12 - 50, top + 40, 54, "DATA");
         progLcd->text = [this]
         {
@@ -555,10 +559,14 @@ AmariKeysEditor::AmariKeysEditor (AmariKeysProcessor& p)
             const int pi = proc.getCurrentPatch(), count = proc.getPatchCount();
             String l1 = pi >= 0 ? String (pi + 1).paddedLeft ('0', 3) + "  " + proc.getPatchName (pi).toUpperCase() : String ("---  NO PATCH");
             String l2;
+            if (learnedMsgUntil != 0) return std::make_pair (learnedMsg, String ("Right-click the control again to remove it, or see MIDI MAP"));
             if (proc.isLearnMode())
             {
-                const auto t = proc.getLearnTargetName();
-                l2 = t.isEmpty() ? "LEARN: click a control" : "LEARN: move a hardware control for " + t;
+                const auto t = proc.getLearnTargetName().toUpperCase();
+                String hint = "Move a knob or press a button on your keyboard";
+                if (proc.ccSeen.load() == learnStartCc && proc.notesSeen.load() != learnStartNotes)
+                    hint = "Only notes arriving - check keyboard control mode / DAW MIDI input";
+                return std::make_pair ("MIDI LEARN:  " + t, hint);
             }
             else if (pi < 0) l2 = count == 0 ? "SAVE AS to keep this sound as your first patch" : String (count) + " PATCHES  |  BROWSE or < > to pick one";
             else
@@ -573,14 +581,14 @@ AmariKeysEditor::AmariKeysEditor (AmariKeysProcessor& p)
             return std::make_pair (l1, l2);
         };
         progLcd->onDoubleClick = [this] { showPatchMenu(); };
-        progLcd->onClick = [this] { if (! proc.isLearnMode()) { proc.setBrowseTarget (-1); for (auto* st : strips) { st->selected = false; st->repaint(); } progLcd->repaint(); } };
+        progLcd->onClick = [this] { proc.setBrowseTarget (-1); for (auto* st : strips) { st->selected = false; st->repaint(); } progLcd->repaint(); };
         auto pb = [this, &styleBtn] (TextButton& b, int bx, int bw) { styleBtn (b, false); b.setBounds (bx, 0, bw, 22); };
         const int by = top + 104;
         pb (prevPatch, x + 12, 26); pb (nextPatch, x + 42, 26); pb (browsePatch, x + 74, 70); pb (saveAsPatch, x + 150, 66);
         pb (renamePatchBtn, x + 222, 62); pb (deletePatchBtn, x + 290, 58);
         for (auto* b : { &prevPatch, &nextPatch, &browsePatch, &saveAsPatch, &renamePatchBtn, &deletePatchBtn }) b->setTopLeftPosition (b->getX(), by);
-        prevPatch.onClick = [this] { if (! proc.isLearnMode()) stepPatch (-1); };
-        nextPatch.onClick = [this] { if (! proc.isLearnMode()) stepPatch (1); };
+        prevPatch.onClick = [this] { stepPatch (-1); };
+        nextPatch.onClick = [this] { stepPatch (1); };
         prevPatch.getProperties().set ("learnAction", AmariKeysProcessor::actPatchPrev);
         nextPatch.getProperties().set ("learnAction", AmariKeysProcessor::actPatchNext);
         browsePatch.onClick = [this] { showPatchMenu(); };
@@ -610,7 +618,7 @@ AmariKeysEditor::AmariKeysEditor (AmariKeysProcessor& p)
         {
             strips[l] = make<ChannelStrip> (proc, l);
             strips[l]->setBounds (x + 12 + l * 42, top + 158, 40, 180);
-            strips[l]->onSelect = [this] (int layer) { if (! proc.isLearnMode()) { selectLayer (layer); proc.setBrowseTarget (layer); } };
+            strips[l]->onSelect = [this] (int layer) { selectLayer (layer); proc.setBrowseTarget (layer); };
             strips[l]->getProperties().set ("learnAction", AmariKeysProcessor::actSelectLayer + l);
         }
     }
@@ -909,12 +917,12 @@ void AmariKeysEditor::showMidiMap()
 {
     auto maps = proc.getMappings();
     PopupMenu m;
-    m.addSectionHeader ("MIDI MAP - click one to remove it");
+    m.addSectionHeader ("MIDI MAP  -  click one to remove it");
     for (auto& mp : maps) m.addItem (mp.cc + 1, "CC " + String (mp.cc).paddedLeft ('0', 3) + "   ->   " + mp.name);
     if (maps.isEmpty()) m.addItem (-9, "Nothing learned yet. Click MIDI LEARN, then a control, then move a knob", false);
     m.addSeparator();
     m.addItem (-1, "Clear all", ! maps.isEmpty());
-    m.addItem (-8, "Also learnable: PATCH < >, DATA dial, ENTER, PANIC, the PATCH screen (dial = patches) and each mixer strip (select layer)", false);
+    m.addItem (-8, "To add one: right-click a control > MIDI Learn, then move a knob on your keyboard", false);
     m.showMenuAsync (PopupMenu::Options().withTargetComponent (mapButton).withStandardItemHeight (20), [this] (int r)
     {
         if (r > 0) proc.removeMapping (r - 1);
@@ -922,14 +930,40 @@ void AmariKeysEditor::showMidiMap()
     });
 }
 
+void AmariKeysEditor::showLearnMenu (Component* target, int code, Point<int> where)
+{
+    int cc = -1;
+    for (auto& mp : proc.getMappings()) if (mp.name == proc.targetName (code)) cc = mp.cc;
+    PopupMenu m;
+    m.addSectionHeader (proc.targetName (code).toUpperCase());
+    m.addItem (1, "MIDI Learn");
+    if (cc >= 0) m.addItem (2, "Remove MIDI  (CC " + String (cc) + ")");
+    if (proc.isLearnMode()) m.addItem (3, "Cancel MIDI Learn");
+    SafePointer<Component> safeTarget (target);
+    m.showMenuAsync (PopupMenu::Options().withTargetScreenArea ({ where.x, where.y, 1, 1 }).withStandardItemHeight (20),
+                     [this, safeTarget, code, cc] (int r)
+    {
+        if (r == 1 && safeTarget != nullptr)
+        {
+            learnStartHits = proc.learnHits.load(); learnStartCc = proc.ccSeen.load(); learnStartNotes = proc.notesSeen.load();
+            proc.startLearn (code);
+            learnComp = safeTarget; blinkTicks = 0;
+            content.addChildComponent (blink);
+            progLcd->repaint();
+        }
+        else if (r == 2) { proc.removeMapping (cc); learnedMsg = "MIDI REMOVED: " + proc.targetName (code); learnedMsgUntil = Time::getMillisecondCounter() + 2500; progLcd->repaint(); }
+        else if (r == 3) proc.setLearnMode (false);
+    });
+}
+
 void AmariKeysEditor::mouseDown (const MouseEvent& e)
 {
-    if (! proc.isLearnMode()) return;
+    if (! e.mods.isPopupMenu()) return;
     for (auto* c = e.originalComponent; c != nullptr && c != &content; c = c->getParentComponent())
     {
         const auto id = c->getProperties()["paramId"].toString();
-        if (id.isNotEmpty()) { proc.setLearnTarget (id); progLcd->repaint(); return; }
-        if (c->getProperties().contains ("learnAction")) { proc.setLearnAction ((int) c->getProperties()["learnAction"]); progLcd->repaint(); return; }
+        if (id.isNotEmpty()) { showLearnMenu (c, proc.paramIndex (id), e.getScreenPosition()); return; }
+        if (c->getProperties().contains ("learnAction")) { showLearnMenu (c, AmariKeysProcessor::actionBase + (int) c->getProperties()["learnAction"], e.getScreenPosition()); return; }
     }
 }
 
@@ -950,7 +984,7 @@ void AmariKeysEditor::paintContent (Graphics& g)
     g.drawText ("A M A R I   K E Y S", 16, 0, 220, 40, Justification::centredLeft, false);
     drawLed (g, { 222.0f, 17.0f, 6.0f, 6.0f }, true);
     g.setColour (col::dim); g.setFont (FontOptions (9.0f, Font::bold));
-    g.drawText ("AMARI LABS  |  BUILD 0.6", 238, 0, 200, 40, Justification::centredLeft, false);
+    g.drawText ("AMARI LABS  |  BUILD 0.6.1", 238, 0, 200, 40, Justification::centredLeft, false);
 
     for (auto& s : sections)
     {
@@ -1023,7 +1057,29 @@ void AmariKeysEditor::timerCallback()
     modWheel->setDisplayed (proc.getModWheel());
     renamePatchBtn.setEnabled (proc.getCurrentPatch() >= 0);
     deletePatchBtn.setEnabled (proc.getCurrentPatch() >= 0);
-    if (learnButton.getToggleState() != proc.isLearnMode()) learnButton.setToggleState (proc.isLearnMode(), dontSendNotification);
+    // MIDI learn: blink the control until a knob/button on the keyboard is moved
+    if (learnComp != nullptr)
+    {
+        if (proc.learnHits.load() != learnStartHits)
+        {
+            const auto maps = proc.getMappings();
+            const int code = proc.getLastLearnedCode();
+            learnedMsg = "LEARNED: " + proc.targetName (code);
+            for (auto& mp : maps) if (mp.name == proc.targetName (code)) learnedMsg = "LEARNED  CC " + String (mp.cc) + "  ->  " + mp.name;
+            learnedMsgUntil = Time::getMillisecondCounter() + 3500;
+            learnComp = nullptr; blink.setVisible (false); progLcd->repaint();
+        }
+        else if (! proc.isLearnMode()) { learnComp = nullptr; blink.setVisible (false); progLcd->repaint(); }
+        else
+        {
+            blink.setBounds (content.getLocalArea (learnComp, learnComp->getLocalBounds()).expanded (4));
+            blink.setVisible ((++blinkTicks / 4) % 2 == 0);
+            blink.toFront (false);
+            if (blinkTicks % 8 == 0) progLcd->repaint();
+        }
+    }
+    else if (blink.isVisible()) blink.setVisible (false);
+    if (learnedMsgUntil != 0 && Time::getMillisecondCounter() > learnedMsgUntil) { learnedMsgUntil = 0; progLcd->repaint(); }
     // cheap periodic refresh of displays, strips and zone bar
     progLcd->repaint(); keysLcd->repaint(); synLcd->repaint();
     for (auto* s : strips) s->repaint();

@@ -134,13 +134,18 @@ int main()
         std::unique_ptr<AmariKeysProcessor> p (make());
         AudioBuffer<float> b (2, 256);
         auto cc = [&] (int n, int v) { MidiBuffer mb; mb.addEvent (MidiMessage::controllerEvent (1, n, v), 0); block (*p, mb, b); pump (60); };
-        p->setLearnMode (true);
-        p->setLearnAction (AmariKeysProcessor::actPatchNext); cc (20, 127);
-        p->setLearnAction (AmariKeysProcessor::actDial); cc (21, 64);
-        p->setLearnAction (AmariKeysProcessor::actEnter); cc (22, 127);
-        p->setLearnAction (AmariKeysProcessor::actSelectLayer + 0); cc (23, 127);
-        p->setLearnTarget ("l1_level"); cc (24, 10);
-        p->setLearnMode (false);
+        // right-click > MIDI Learn, then move one control: learning ends by itself
+        p->startLearn (AmariKeysProcessor::actionBase + AmariKeysProcessor::actPatchNext); cc (20, 127);
+        check (! p->isLearnMode(), "learning stops after one control");
+        p->startLearn (AmariKeysProcessor::actionBase + AmariKeysProcessor::actDial); cc (21, 64);
+        p->startLearn (AmariKeysProcessor::actionBase + AmariKeysProcessor::actEnter); cc (22, 127);
+        p->startLearn (AmariKeysProcessor::actionBase + AmariKeysProcessor::actSelectLayer + 0); cc (23, 127);
+        p->startLearn (p->paramIndex ("l1_level")); cc (24, 10);
+        check (p->apvts.getRawParameterValue ("l1_level")->load() > 0.5f, "the knob move that teaches doesn't change the setting");
+        const int notesBefore = p->notesSeen.load(), ccBefore = p->ccSeen.load();
+        { MidiBuffer mb; mb.addEvent (MidiMessage::noteOn (1, 60, (uint8) 90), 0); block (*p, mb, b); }
+        check (p->notesSeen.load() == notesBefore + 1 && p->ccSeen.load() == ccBefore, "MIDI activity counters (used for the 'only notes arriving' hint)");
+        { MidiBuffer mb; mb.addEvent (MidiMessage::allNotesOff (1), 0); block (*p, mb, b); }
         auto maps = p->getMappings();
         check (maps.size() == 5, "five controls learned (" + String (maps.size()) + ")");
         for (auto& m : maps) std::cout << "        CC " << m.cc << " -> " << m.name << "\n";

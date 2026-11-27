@@ -88,6 +88,15 @@ public:
     enum Action { actPatchPrev = 0, actPatchNext, actDial, actEnter, actPanic, actBrowsePatches, actSelectLayer = 10 };
     static constexpr int actionBase = 100000;
     void setLearnAction (int action) { learnTarget.store (actionBase + action); }
+    void startLearn (int code) { learnTarget.store (code); learnMode.store (true); }  // waits for the next knob/button
+    int paramIndex (const juce::String& paramId) const
+    {
+        for (int i = 0; i < paramList.size(); ++i)
+            if (auto* r = dynamic_cast<juce::RangedAudioParameter*> (paramList[i])) if (r->getParameterID() == paramId) return i;
+        return -1;
+    }
+    int getLastLearnedCode() const { return lastLearned.load(); }
+    std::atomic<int> ccSeen { 0 }, notesSeen { 0 };   // MIDI activity, so learn can tell what is (not) arriving
     static juce::String actionName (int action);
     juce::String targetName (int code) const;
     struct Mapping { int cc; juce::String name; };
@@ -162,6 +171,7 @@ private:
     void saveMidiMap();
     void loadMidiMap (const juce::String& map);
     std::atomic<bool> midiMapDirty { false };
+    std::atomic<int> lastLearned { -1 };
     juce::Array<juce::AudioProcessorParameter*> paramList;
 
     // effects

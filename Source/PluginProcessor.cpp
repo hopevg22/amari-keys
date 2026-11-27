@@ -528,6 +528,7 @@ void AmariKeysProcessor::noteOffLayer (int l, int note, bool pedalLifted)
 void AmariKeysProcessor::handleMidi (const juce::MidiMessage& m)
 {
     const int ch = juce::jlimit (0, 15, m.getChannel() - 1);
+    if (m.isNoteOn()) ++notesSeen;
     if (m.isNoteOn())
     {
         const int note = m.getNoteNumber();
@@ -592,6 +593,7 @@ void AmariKeysProcessor::handleMidi (const juce::MidiMessage& m)
     else if (m.isController())
     {
         const int cc = m.getControllerNumber(), val = m.getControllerValue();
+        ++ccSeen;
         if (cc == 64)
         {
             sustain = val >= 64;
@@ -608,7 +610,9 @@ void AmariKeysProcessor::handleMidi (const juce::MidiMessage& m)
         {
             for (auto& c : ccMap) if (c.load() == learnTarget.load()) c.store (-1);
             ccMap[cc].store (learnTarget.load());
+            lastLearned.store (learnTarget.load());
             learnTarget.store (-1);
+            learnMode.store (false);   // one control per learn: done
             learnHits++;
             midiMapDirty.store (true);
             return; // the move that taught it doesn't also trigger it

@@ -31,6 +31,23 @@ void drawLed (juce::Graphics&, juce::Rectangle<float> r, bool on);
 // Base for controls that can be re-pointed at another parameter (editor panels follow the selected layer)
 struct Bindable { virtual ~Bindable() = default; virtual void bind (const juce::String& paramId) = 0; juce::String paramId; };
 
+// Left button only: the right button opens the MIDI Learn menu instead of moving a control.
+class LSlider : public juce::Slider
+{
+public:
+    using juce::Slider::Slider;
+    void mouseDown (const juce::MouseEvent& e) override { if (! e.mods.isPopupMenu()) juce::Slider::mouseDown (e); }
+    void mouseDrag (const juce::MouseEvent& e) override { if (! e.mods.isPopupMenu()) juce::Slider::mouseDrag (e); }
+    void mouseUp (const juce::MouseEvent& e) override { if (! e.mods.isPopupMenu()) juce::Slider::mouseUp (e); }
+};
+class Btn : public juce::TextButton
+{
+public:
+    using juce::TextButton::TextButton;
+    void mouseDown (const juce::MouseEvent& e) override { if (! e.mods.isPopupMenu()) juce::TextButton::mouseDown (e); }
+    void mouseUp (const juce::MouseEvent& e) override { if (! e.mods.isPopupMenu()) juce::TextButton::mouseUp (e); }
+};
+
 class Knob : public juce::Component, public Bindable
 {
 public:
@@ -38,7 +55,7 @@ public:
     void bind (const juce::String& id) override;
     void resized() override;
     void paint (juce::Graphics&) override;
-    juce::Slider slider;
+    LSlider slider;
 private:
     juce::AudioProcessorValueTreeState& state;
     juce::String caption; int knobSize;
@@ -52,7 +69,7 @@ public:
     void bind (const juce::String& id) override;
     void resized() override;
     void paint (juce::Graphics&) override;
-    juce::Slider slider;
+    LSlider slider;
 private:
     juce::AudioProcessorValueTreeState& state;
     juce::String caption;
@@ -64,6 +81,8 @@ class LedToggle : public juce::ToggleButton, public Bindable
 public:
     LedToggle (juce::AudioProcessorValueTreeState&, const juce::String& paramId, const juce::String& label);
     void bind (const juce::String& id) override;
+    void mouseDown (const juce::MouseEvent& e) override { if (! e.mods.isPopupMenu()) juce::ToggleButton::mouseDown (e); }
+    void mouseUp (const juce::MouseEvent& e) override { if (! e.mods.isPopupMenu()) juce::ToggleButton::mouseUp (e); }
 private:
     juce::AudioProcessorValueTreeState& state;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> att;
@@ -107,7 +126,7 @@ public:
     bool big = false;
     void paint (juce::Graphics&) override;
     void mouseDoubleClick (const juce::MouseEvent&) override { if (onDoubleClick) onDoubleClick(); }
-    void mouseUp (const juce::MouseEvent& e) override { if (onClick && e.getNumberOfClicks() == 1 && ! e.mouseWasDraggedSinceMouseDown()) onClick(); }
+    void mouseUp (const juce::MouseEvent& e) override { if (onClick && ! e.mods.isPopupMenu() && e.getNumberOfClicks() == 1 && ! e.mouseWasDraggedSinceMouseDown()) onClick(); }
 };
 
 class PadButton : public juce::Component
@@ -147,6 +166,7 @@ public:
     void mouseDown (const juce::MouseEvent&) override { dragAcc = 0.0f; lastY = 0; }
     void mouseDrag (const juce::MouseEvent& e) override
     {
+        if (e.mods.isPopupMenu()) return;
         const int y = e.getDistanceFromDragStartY();
         dragAcc += (float) (lastY - y); lastY = y;
         while (dragAcc >= 7.0f) { dragAcc -= 7.0f; step (1); }
@@ -175,7 +195,7 @@ public:
     void mouseDown (const juce::MouseEvent&) override;
     void mouseDrag (const juce::MouseEvent&) override;
     void mouseUp (const juce::MouseEvent&) override;
-    void mouseDoubleClick (const juce::MouseEvent&) override { set (0.0f); }
+    void mouseDoubleClick (const juce::MouseEvent& e) override { if (! e.mods.isPopupMenu()) set (0.0f); }
 private:
     void timerCallback() override;
     void set (float v) { value = v; repaint(); if (onChange) onChange (v); }
@@ -207,6 +227,19 @@ private:
     void askName (const juce::String& title, const juce::String& message, const juce::String& initial, std::function<void (juce::String)> done);
     void stepPatch (int delta);
     void showMidiMap();
+    void showLearnMenu (juce::Component* target, int code, juce::Point<int> where);
+    juce::Component::SafePointer<juce::Component> learnComp;
+    struct BlinkFrame : juce::Component
+    {
+        BlinkFrame() { setInterceptsMouseClicks (false, false); }
+        void paint (juce::Graphics& g) override
+        {
+            g.setColour (juce::Colour (0xffff6a1f)); g.drawRoundedRectangle (getLocalBounds().toFloat().reduced (1.0f), 4.0f, 2.5f);
+            g.setColour (juce::Colour (0x33ff6a1f)); g.fillRoundedRectangle (getLocalBounds().toFloat().reduced (2.0f), 4.0f);
+        }
+    } blink;
+    int learnStartHits = 0, learnStartCc = 0, learnStartNotes = 0, blinkTicks = 0;
+    juce::String learnedMsg; juce::uint32 learnedMsgUntil = 0;
 
     struct Content : public juce::Component
     {
@@ -231,12 +264,12 @@ private:
     ak::PadButton* pads[AmariKeysProcessor::numPads] {};
     int lastPadHits[AmariKeysProcessor::numPads] {};
     ak::ChannelStrip* strips[AmariKeysProcessor::numLayers] {};
-    juce::TextButton prevPatch { "<" }, nextPatch { ">" }, browsePatch { "BROWSE" }, saveAsPatch { "SAVE AS" }, renamePatchBtn { "RENAME" }, deletePatchBtn { "DELETE" };
-    juce::TextButton storeButton { "STORE" }, panicButton { "PANIC" }, learnButton { "MIDI LEARN" }, mapButton { "MIDI MAP" }, enterButton { "ENTER" };
+    ak::Btn prevPatch { "<" }, nextPatch { ">" }, browsePatch { "BROWSE" }, saveAsPatch { "SAVE AS" }, renamePatchBtn { "RENAME" }, deletePatchBtn { "DELETE" };
+    ak::Btn storeButton { "STORE" }, panicButton { "PANIC" }, mapButton { "MIDI MAP" }, enterButton { "ENTER" };
     ak::DataDial* dataDial = nullptr;
-    juce::TextButton keysLoadFolder { "LOAD FOLDER" }, keysLoadSfz { "LOAD SFZ" }, synLoadFolder { "FOLDER" }, synLoadSfz { "SFZ" };
-    juce::TextButton keysSounds { "SOUNDS" }, keysSaveSound { "SAVE SOUND" }, synSounds { "SOUNDS" }, synSaveSound { "SAVE" };
-    juce::Slider splitNote, transpose, bendRange;
+    ak::Btn keysLoadFolder { "LOAD FOLDER" }, keysLoadSfz { "LOAD SFZ" }, synLoadFolder { "FOLDER" }, synLoadSfz { "SFZ" };
+    ak::Btn keysSounds { "SOUNDS" }, keysSaveSound { "SAVE SOUND" }, synSounds { "SOUNDS" }, synSaveSound { "SAVE" };
+    ak::LSlider splitNote, transpose, bendRange;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> splitAtt, transAtt, bendAtt;
     ak::Wheel* pitchWheel = nullptr; ak::Wheel* modWheel = nullptr;
     std::unique_ptr<juce::FileChooser> chooser;
